@@ -81,6 +81,36 @@ class SnipeTests(unittest.TestCase):
         self.assertTrue(signals[0].reason.startswith("SNIPE YES"))
         self.assertGreater(signals[0].expected_value, 0.0)
 
+    def test_snipe_band_is_capped_by_the_ev_breakeven(self) -> None:
+        # Buying above hold / (1 + min_ev) can never clear the EV gate, so the
+        # advertised [0.93, 0.97] band must collapse to what can actually fire.
+        self.assertAlmostEqual(self.engine.snipe_max_ask(), 0.95 / 1.02, places=6)
+        self.assertLess(self.engine.snipe_max_ask(), 0.97)
+
+    def test_snipe_stops_exactly_at_the_breakeven_ask(self) -> None:
+        market = make_market(self.now + timedelta(days=0.08))
+        inside = self.engine.check_snipe(
+            market,
+            make_book("yes-token", 0.9300, 0.9313),
+            make_book("no-token", 0.0600, 0.0687),
+            now=self.now,
+        )
+        self.assertEqual(len(inside), 1)
+        outside = self.engine.check_snipe(
+            market,
+            make_book("yes-token", 0.9300, 0.9314),
+            make_book("no-token", 0.0600, 0.0686),
+            now=self.now,
+        )
+        self.assertEqual(outside, [])
+
+    def test_describe_gates_prints_the_numbers_a_quiet_bot_needs(self) -> None:
+        text = self.engine.describe_gates()
+        self.assertIn("0.985", text)
+        self.assertIn("0.9314", text)
+        self.assertIn("min_ev=0.0200", text)
+        self.assertNotIn("band is empty", text)
+
     def test_snipe_rejects_insufficient_ev_in_band(self) -> None:
         market = make_market(self.now + timedelta(days=0.08))
         signals = self.engine.check_snipe(

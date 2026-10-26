@@ -88,6 +88,29 @@ class StrategyEngine:
             ),
         ]
 
+    def snipe_max_ask(self) -> float:
+        """Highest ask that still clears ``MIN_EV`` against the hold assumption.
+
+        ``SNIPE_MAX_ASK`` is the price band the strategy is willing to look at;
+        the EV gate is what actually binds. Buying above
+        ``hold / (1 + min_ev)`` cannot clear ``(hold - ask) / ask > min_ev`` no
+        matter how near resolution the market is, so the two are reconciled here
+        instead of leaving a band that can never fire.
+        """
+        return min(SNIPE_MAX_ASK, SNIPE_HOLD_PROBABILITY / (1.0 + self.min_ev))
+
+    def describe_gates(self) -> str:
+        """One line a log can print so "why is it quiet?" is answerable."""
+        low = max(SNIPE_MIN_ASK, 0.0)
+        high = self.snipe_max_ask()
+        return (
+            f"ARB fires when yes_ask + no_ask < {ARBITRAGE_THRESHOLD:.3f}; "
+            f"SNIPE fires when ttl_days < {SNIPE_MAX_TTL_DAYS:.2f} and the best ask "
+            f"is in [{low:.4f}, {high:.4f}) with hold={SNIPE_HOLD_PROBABILITY:.2f} "
+            f"min_ev={self.min_ev:.4f}"
+            + ("" if high > low else " (this band is empty: raise SNIPE hold or lower MIN_EV)")
+        )
+
     def check_snipe(
         self,
         market: Market,
@@ -112,7 +135,7 @@ class StrategyEngine:
             ("NO", market.token_no, no_book),
         ):
             ask = book.best_ask
-            if ask is None or not (SNIPE_MIN_ASK <= ask <= SNIPE_MAX_ASK):
+            if ask is None or not (SNIPE_MIN_ASK <= ask < self.snipe_max_ask()):
                 continue
             ev_roi = (SNIPE_HOLD_PROBABILITY - ask) / ask
             if ev_roi <= self.min_ev:

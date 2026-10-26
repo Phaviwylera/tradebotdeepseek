@@ -57,6 +57,50 @@ stops an idle service, so the repo is set up accordingly:
    Cycle complete: markets=20 books=18 new_signals=0 risk={...}
    ```
 
+### Where is my URL? (blueprint id vs service URL)
+
+Render gives you two different ids and only one of them is a URL:
+
+| What you see | Example | What it is |
+|---|---|---|
+| Blueprint instance id | `exs-dbfmfie7bikc73e4bteg` | the deploy *bundle*, not reachable |
+| Service id | `srv-xxxxxxxx` | the running service, still not a URL |
+| Service URL | `https://polymarket-calibrated-bot.onrender.com` | **this is the one** |
+
+The URL is derived from `services[0].name` in `render.yaml`
+(`polymarket-calibrated-bot`), with a suffix if that name is taken:
+
+```text
+https://<name>.onrender.com
+```
+
+Three ways to find it:
+
+1. Dashboard → the blueprint → its resource list → click the service. The URL is
+   in the header of the service page.
+2. Dashboard → **Services** → `polymarket-calibrated-bot`.
+3. Guess it and check: open `https://<name>.onrender.com/healthz`. A live bot
+   answers `{"ok":true,"service":"polymarket-status",...}`.
+
+A blueprint only creates the service after you click **Apply**; until the build
+finishes there is nothing to open. If the build failed, the service page shows the
+log tail — the usual cause is a red `render.yaml`, which
+`python scripts/check_configs.py` catches locally.
+
+### The console shows "Demo data" and 401s
+
+That is the read-only API asking for its bearer token, which the blueprint
+generates for you. Both are correct behaviour — pick one:
+
+- **Keep it private:** Render → the service → **Environment** → reveal
+  `DASHBOARD_TOKEN`, then paste it into the console's **Connect** dialog (or set
+  `BOT_API_TOKEN` to the same value in Vercel). The value stays in your browser's
+  `localStorage` / in the Vercel function; it is never bundled into the page.
+- **Make the console public:** set `DASHBOARD_TOKEN` to an empty string in Render
+  and redeploy. `/api/status` then answers without a token. Reasonable while
+  `LIVE=false` (no funds, no keys) — but re-add a token before you ever flip
+  `LIVE=true`.
+
 ### What you give up on the free plan
 
 - **The ledger is ephemeral.** Every deploy or crash restarts `/tmp`; signal

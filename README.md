@@ -317,6 +317,12 @@ intervals, the loop is stalled even though the container is up.
    keep-alive workflow stops the free instance from spinning down.
 4. Leave `LIVE=false`. Confirm the logs show `DRY-RUN MODE`.
 5. Open the service URL — the bot is serving the console on the same port.
+   The URL is `https://<name>.onrender.com`, where `<name>` is
+   `services[0].name` in `render.yaml`; a blueprint id like `exs-…` or a service id
+   like `srv-…` is *not* a URL. Probe `https://<name>.onrender.com/healthz` to
+   check. The blueprint's generated `DASHBOARD_TOKEN` makes `/api/*` answer 401
+   until you paste it into **Connect** — see
+   [docs/FREE_HOSTING.md](docs/FREE_HOSTING.md#the-console-shows-demo-data-and-401s).
 
 The free plan has no disk, so the ledger lives in `/tmp` and is lost on restart;
 `deploy/render-starter.yaml` is the $7/mo upgrade that adds a 1 GB disk at

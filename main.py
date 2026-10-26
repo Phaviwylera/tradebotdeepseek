@@ -579,8 +579,8 @@ async def async_main() -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
-    await bot.start()
     try:
+        await bot.start()
         await bot.run()
     finally:
         await bot.shutdown()

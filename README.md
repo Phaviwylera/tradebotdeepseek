@@ -288,6 +288,9 @@ Covered:
   `RiskManager.record_settlement()` is the audited settlement hook for an
   operator or separate settlement job. Until settlements are recorded, kill
   switch math reflects fills but may not reflect final resolution outcomes.
+- Risk state is in memory and is reinitialized from `BANKROLL` on every process
+  start. Reconcile the wallet and open positions before restarting a LIVE
+  worker; do not use a restart to bypass a kill switch.
 - One process, one SQLite file. Do not run duplicate workers.
 
 ---

@@ -26,7 +26,7 @@ from features import build_features
 from ledger import Ledger
 from model import ProbabilityModel
 from risk import RiskManager
-from scanner import Market, MarketScanner, OrderBook
+from scanner import Market, MarketScanner, OrderBook, select_markets
 from snapshots import SnapshotRecorder
 from strategy import Signal, StrategyEngine
 from stream import BookStream
@@ -76,6 +76,16 @@ class TradingBot:
         self._shutdown_done = False
         self._status_server: web.StatusHTTPServer | None = None
         self.model_info: dict[str, Any] = {}
+        # Published on /healthz so "no signals" can be explained per cycle
+        # instead of guessed at from a token-protected table.
+        self.diagnostics: dict[str, Any] = {
+            "near_resolution_candidates": 0,
+            "near_resolution_selected": 0,
+            "markets_in_snipe_band": 0,
+            "closest_snipe_price": None,
+            "best_arb_sum": None,
+            "closest_ttl_hours": None,
+        }
         self.snapshots = SnapshotRecorder(getattr(settings, "snapshot_path", None))
         self._status_thread: threading.Thread | None = None
         self.stream = BookStream(
@@ -181,14 +191,41 @@ class TradingBot:
                 port=self.settings.api_port or None,
                 serve_dashboard=self.settings.serve_dashboard,
                 model_info=self.model_info,
+                diagnostics=self.diagnostics,
             )
         except OSError:
             # A busy port must never stop the trading loop.
             logger.exception("Status server could not bind; trading continues without HTTP status")
 
     async def run_cycle(self) -> None:
-        markets = await self.scanner.scan()
-        markets = markets[: self.settings.max_markets_per_cycle]
+        volume_lane = await self.scanner.scan()
+        try:
+            near_lane = await self.scanner.scan_near_resolution(
+                window_hours=self.settings.near_resolution_window_hours,
+                limit=200,
+            )
+        except Exception:
+            # Discovery of the second lane must never break the cycle; the
+            # arbitrage lane still runs.
+            logger.exception("Near-resolution discovery failed")
+            near_lane = []
+
+        markets = select_markets(
+            volume_lane,
+            near_lane,
+            max_total=self.settings.max_markets_per_cycle,
+            near_slots=self.settings.near_resolution_slots,
+        )
+        near_ids = {market.condition_id for market in near_lane}
+        self.diagnostics["near_resolution_candidates"] = len(near_lane)
+        self.diagnostics["near_resolution_selected"] = sum(
+            1 for market in markets if market.condition_id in near_ids
+        )
+        # Rebuilt every cycle: stale diagnostics are worse than none.
+        self.diagnostics["markets_in_snipe_band"] = 0
+        self.diagnostics["closest_snipe_price"] = None
+        self.diagnostics["best_arb_sum"] = None
+        self.diagnostics["closest_ttl_hours"] = None
         self.stream.set_assets(
             token for market in markets for token in (market.token_yes, market.token_no)
         )
@@ -222,11 +259,12 @@ class TradingBot:
 
         risk_status = self.risk.status()
         logger.info(
-            "Cycle complete: markets=%d books=%d new_signals=%d risk=%s",
+            "Cycle complete: markets=%d books=%d new_signals=%d risk=%s snipes_in_band=%d",
             len(markets),
             evaluated,
             generated,
             risk_status,
+            self.diagnostics["markets_in_snipe_band"],
         )
         try:
             self.ledger.record_cycle(
@@ -279,7 +317,53 @@ class TradingBot:
             if signal is not None:
                 generated += await self._handle_signal(signal, "MODEL")
 
+        self._record_gate_proximity(market, yes_book, no_book)
         return generated
+
+    def _record_gate_proximity(
+        self, market: Market, yes_book: OrderBook, no_book: OrderBook
+    ) -> None:
+        """Track how close each market came to a gate, for /healthz.
+
+        "No signals" and "no signals because the closest market was 6 cents away"
+        are different answers; this makes the second one visible.
+        """
+        strategy = self.strategy
+        yes_ask, no_ask = yes_book.best_ask, no_book.best_ask
+        if yes_ask is not None and no_ask is not None:
+            total = float(yes_ask) + float(no_ask)
+            best = self.diagnostics.get("best_arb_sum")
+            if best is None or total < best:
+                self.diagnostics["best_arb_sum"] = round(total, 4)
+
+        ttl_days = market.ttl_days()
+        if ttl_days is not None:
+            hours = round(ttl_days * 24.0, 2)
+            closest = self.diagnostics.get("closest_ttl_hours")
+            if closest is None or abs(hours) < abs(closest):
+                self.diagnostics["closest_ttl_hours"] = hours
+
+        low, high = strategy.snipe_band()
+        candidates = [price for price in (yes_ask, no_ask) if price is not None]
+        if not candidates:
+            return
+        in_band = [price for price in candidates if low <= float(price) < high]
+        if in_band:
+            self.diagnostics["markets_in_snipe_band"] += 1
+        # Distance from the tradeable band, so "how close were we?" is answerable.
+        nearest = min(
+            candidates,
+            key=lambda price: 0.0
+            if low <= float(price) < high
+            else min(abs(float(price) - low), abs(float(price) - high)),
+        )
+        distance = abs(float(nearest) - (low if float(nearest) < low else high))
+        previous = self.diagnostics.get("closest_snipe_price")
+        if previous is None or distance < previous.get("distance", float("inf")):
+            self.diagnostics["closest_snipe_price"] = {
+                "ask": round(float(nearest), 4),
+                "distance": round(distance, 4),
+            }
 
     def _model_signal(
         self, market: Market, yes_book: OrderBook, no_book: OrderBook
@@ -648,10 +732,13 @@ async def async_main() -> None:
         settings.clob_host,
         page_size=settings.scan_page_size,
         max_pages=settings.scan_max_pages,
+        near_window_hours=settings.near_resolution_window_hours,
+        near_overdue_hours=settings.near_resolution_overdue_hours,
     )
     strategy = StrategyEngine(
         min_ev=settings.min_ev,
         max_bet=settings.max_bet,
+        snipe_overdue_hours=settings.snipe_overdue_hours,
     )
     risk = RiskManager(
         bankroll=settings.bankroll,

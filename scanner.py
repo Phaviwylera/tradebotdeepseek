@@ -12,7 +12,7 @@ import json
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -178,6 +178,10 @@ class MarketScanner:
         min_volume: float = 5_000.0,
         min_liquidity: float = 1_000.0,
         timeout_seconds: float = 20.0,
+        near_window_hours: float = 6.0,
+        near_overdue_hours: float = 24.0,
+        near_min_volume: float = 0.0,
+        near_min_liquidity: float = 0.0,
     ) -> None:
         self.gamma_api_url = gamma_api_url.rstrip("/")
         self.clob_host = clob_host.rstrip("/")
@@ -189,6 +193,14 @@ class MarketScanner:
         self.min_volume = min_volume
         self.min_liquidity = min_liquidity
         self.timeout_seconds = timeout_seconds
+        # Near-resolution discovery is its own lane on purpose: those markets are
+        # small, settle within hours, and are never in the top-volume set the
+        # arbitrage lane scans. Filtering them with the volume floor above is what
+        # used to make the SNIPE strategy unreachable in practice.
+        self.near_window_hours = near_window_hours
+        self.near_overdue_hours = near_overdue_hours
+        self.near_min_volume = near_min_volume
+        self.near_min_liquidity = near_min_liquidity
 
     async def scan(self) -> list[Market]:
         http = self._get_http()
@@ -231,6 +243,62 @@ class MarketScanner:
             len(markets),
             self.min_volume,
             self.min_liquidity,
+        )
+        return markets
+
+    async def scan_near_resolution(
+        self,
+        *,
+        now: datetime | None = None,
+        window_hours: float | None = None,
+        limit: int = 200,
+    ) -> list[Market]:
+        """Discover markets that settle within hours, ignoring the volume floor.
+
+        Gamma's ``endDate`` is the scheduled close, which for sports markets is
+        the event start: a football market is still tradeable while the match is
+        in play, so the window deliberately starts ``near_overdue_hours`` in the
+        *past*. Without that, in-play markets — where prices actually reach the
+        snipe band — were invisible.
+        """
+        current = now or utc_now()
+        window = self.near_window_hours if window_hours is None else window_hours
+        start = current - timedelta(hours=self.near_overdue_hours)
+        end = current + timedelta(hours=window)
+        params = {
+            "active": "true",
+            "closed": "false",
+            "limit": str(max(1, limit)),
+            "order": "endDate",
+            "ascending": "true",
+            "end_date_min": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end_date_max": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        http = self._get_http()
+        payload = await self._get_json(http, "/markets", params)
+        if isinstance(payload, Mapping):
+            payload = payload.get("data", payload.get("markets", []))
+        if not isinstance(payload, Sequence) or isinstance(payload, str | bytes):
+            raise TypeError("Unexpected Gamma markets response")
+
+        markets: list[Market] = []
+        seen: set[str] = set()
+        for raw in payload:
+            if not isinstance(raw, Mapping):
+                continue
+            market = self._parse_market(
+                raw, min_volume=self.near_min_volume, min_liquidity=self.near_min_liquidity
+            )
+            if market is None or market.condition_id in seen:
+                continue
+            seen.add(market.condition_id)
+            markets.append(market)
+
+        logger.info(
+            "Near-resolution lane: %d markets closing within %.1fh (%.0fh overdue allowed)",
+            len(markets),
+            window,
+            self.near_overdue_hours,
         )
         return markets
 
@@ -294,7 +362,13 @@ class MarketScanner:
                     await asyncio.sleep(1.0 * (2**attempt))
         raise RuntimeError(f"Gamma request failed after retries: {last_error}") from last_error
 
-    def _parse_market(self, raw: Mapping[str, Any]) -> Market | None:
+    def _parse_market(
+        self,
+        raw: Mapping[str, Any],
+        *,
+        min_volume: float | None = None,
+        min_liquidity: float | None = None,
+    ) -> Market | None:
         if _truthy(raw.get("closed")) or not _truthy(raw.get("active", True)):
             return None
         if _truthy(raw.get("archived")):
@@ -323,7 +397,9 @@ class MarketScanner:
 
         volume = _first_float(raw, "volumeNum", "volume", default=0.0)
         liquidity = _first_float(raw, "liquidityNum", "liquidity", default=0.0)
-        if volume <= self.min_volume or liquidity <= self.min_liquidity:
+        floor_volume = self.min_volume if min_volume is None else min_volume
+        floor_liquidity = self.min_liquidity if min_liquidity is None else min_liquidity
+        if volume <= floor_volume or liquidity <= floor_liquidity:
             return None
 
         end_date = parse_datetime(
@@ -340,6 +416,50 @@ class MarketScanner:
             liquidity=liquidity,
             end_date=end_date,
         )
+
+
+def select_markets(
+    volume_lane: Sequence[Market],
+    near_lane: Sequence[Market],
+    *,
+    max_total: int,
+    near_slots: int,
+    now: datetime | None = None,
+) -> list[Market]:
+    """Reserve book-fetch slots for near-resolution markets, then fill by volume.
+
+    Root cause of "the bot never signals": the snipe strategy only fires inside
+    the final hours before a market closes, but the pipeline evaluated the top
+    markets *by volume* — a set that essentially never contains them. Reserving
+    slots makes the strategy reachable without throwing away the liquid markets
+    the arbitrage check needs.
+    """
+    current = now or utc_now()
+    chosen: list[Market] = []
+    seen: set[str] = set()
+
+    def ttl(market: Market) -> float:
+        value = market.ttl_days(current)
+        return float("inf") if value is None else value
+
+    budget_near = max(0, min(near_slots, max_total))
+    for market in sorted(near_lane, key=ttl):
+        if len(chosen) >= budget_near:
+            break
+        if market.condition_id in seen:
+            continue
+        seen.add(market.condition_id)
+        chosen.append(market)
+
+    for market in volume_lane:
+        if len(chosen) >= max_total:
+            break
+        if market.condition_id in seen:
+            continue
+        seen.add(market.condition_id)
+        chosen.append(market)
+
+    return chosen
 
 
 def _truthy(value: Any) -> bool:

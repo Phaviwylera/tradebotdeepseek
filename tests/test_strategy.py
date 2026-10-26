@@ -176,3 +176,53 @@ class ModelEdgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OverdueSnipeTests(unittest.TestCase):
+    """Gamma's endDate is the scheduled close, so in-play markets have ttl < 0."""
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        self.engine = StrategyEngine(min_ev=0.02, max_bet=20.0)
+
+    def test_an_in_play_market_can_still_snipe(self) -> None:
+        # Kick-off was two hours ago; the match is in the 88th minute.
+        market = make_market(self.now - timedelta(hours=2))
+        signals = self.engine.check_snipe(
+            market,
+            make_book("yes-token", 0.9200, 0.9300),
+            make_book("no-token", 0.0600, 0.0700),
+            now=self.now,
+        )
+        self.assertEqual(len(signals), 1)
+        self.assertIn("ttl_h=-2.00", signals[0].reason)
+
+    def test_lateness_is_bounded(self) -> None:
+        market = make_market(self.now - timedelta(hours=30))
+        signals = self.engine.check_snipe(
+            market,
+            make_book("yes-token", 0.9200, 0.9300),
+            make_book("no-token", 0.0600, 0.0700),
+            now=self.now,
+        )
+        self.assertEqual(signals, [])
+
+    def test_overdue_allowance_is_configurable_and_validated(self) -> None:
+        strict = StrategyEngine(min_ev=0.02, max_bet=20.0, snipe_overdue_hours=0.0)
+        market = make_market(self.now - timedelta(minutes=30))
+        self.assertEqual(
+            strict.check_snipe(
+                market,
+                make_book("yes-token", 0.9200, 0.9300),
+                make_book("no-token", 0.0600, 0.0700),
+                now=self.now,
+            ),
+            [],
+        )
+        with self.assertRaises(ValueError):
+            StrategyEngine(snipe_overdue_hours=-1.0)
+
+    def test_gates_mention_the_overdue_window(self) -> None:
+        self.assertIn("24h past the scheduled close", self.engine.describe_gates())
+        low, high = self.engine.snipe_band()
+        self.assertEqual((low, round(high, 4)), (0.93, 0.9314))

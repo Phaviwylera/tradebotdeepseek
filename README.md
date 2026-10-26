@@ -86,9 +86,22 @@ and conservatively books the first leg in the risk ledger.
 
 Only when:
 
-- `0 <= ttl_days < 0.10` (under 2.4 hours), and
-- the best ask is in `[0.93, 0.97]`, and
-- `(0.95 - ask) / ask > MIN_EV`.
+- stage 1: `ttl_days < 0.10` (under 2.4 hours), **or** up to
+  `SNIPE_OVERDUE_HOURS` (default 24) *past* the scheduled close, and
+- stage 2: the best ask is in `[0.93, 0.9314)`, and
+- stage 3: `(0.95 - ask) / ask > MIN_EV`.
+
+Gamma's `endDate` is the scheduled close, which for a sports market is kick-off:
+a match in its 88th minute has a *negative* ttl. Those in-play markets are
+exactly where a 0.93 ask usually means "this resolves YES", so rejecting
+`ttl < 0` used to hide the whole case.
+
+**Discovery matters as much as the gate.** Until recently the pipeline only ever
+evaluated the highest-volume markets, which essentially never close within
+hours — so this strategy could not fire no matter what the prices did. The
+scanner now runs a second lane (`end_date_min`/`end_date_max`, volume floor
+ignored) and `NEAR_RESOLUTION_SLOTS` of the per-cycle budget are reserved for
+it. `NEAR_RESOLUTION_WINDOW_HOURS` (default 6) sets how far ahead to look.
 
 The 95% hold probability is an assumption, not an observed fact. With
 `MIN_EV=0.02`, practically only the lower part of the price band passes. This
@@ -108,8 +121,19 @@ ttl_days < 0.10 and the best ask is in [0.9300, 0.9314) with hold=0.95 min_ev=0.
 
 Both gates are genuinely rare: a complete YES+NO set below 0.985, or a market
 resolving in under 2.4 hours trading under 0.9314. `/healthz` reports
-`markets_scanned`, `markets_evaluated` and `signals_last_cycle`, so "the bot is
-working and simply found no edge" looks different from "the bot is broken".
+`markets_scanned`, `markets_evaluated` and `signals_last_cycle`, plus a `gates`
+block that says how close the cycle actually got:
+
+```json
+"gates": {"near_resolution_candidates": 12, "near_resolution_selected": 8,
+          "markets_in_snipe_band": 0,
+          "closest_snipe_price": {"ask": 0.9123, "distance": 0.0177},
+          "best_arb_sum": 0.9902, "closest_ttl_hours": 1.25}
+```
+
+So "no signals" always has a cause you can read: no markets closing soon, none
+inside the price band, or the cheapest pair still 0.5 cents above the arb
+threshold.
 
 ### 3. Calibrated model divergence
 
@@ -241,6 +265,10 @@ network, no account. The console is also deployed publicly from
 | `MODEL_PATH` | `model.joblib` | Optional calibrated model artifact. |
 | `MODEL_URL` | *(empty)* | Download the artifact at startup when `MODEL_PATH` is absent. How a diskless host gets a model. |
 | `SNAPSHOT_PATH` | *(empty)* | Append pre-resolution feature snapshots (training data). Off by default; needs a disk. |
+| `NEAR_RESOLUTION_SLOTS` | `8` | Book-fetch slots reserved each cycle for markets closing soon. `0` restores volume-only selection (and makes SNIPE unreachable). |
+| `NEAR_RESOLUTION_WINDOW_HOURS` | `6` | How far ahead the near-resolution lane looks. |
+| `NEAR_RESOLUTION_OVERDUE_HOURS` | `24` | How far *past* `endDate` the lane still includes (in-play markets). |
+| `SNIPE_OVERDUE_HOURS` | `24` | How late a market may be and still be snipeable. `0` requires `ttl >= 0`. |
 | `SCAN_INTERVAL_SECONDS` | `60` | Pipeline cadence. |
 | `MAX_MARKETS_PER_CYCLE` | `40` | Book/strategy working set. |
 | `SIGNAL_COOLDOWN_SECONDS` | `3600` | Per-market/strategy dedupe window. |

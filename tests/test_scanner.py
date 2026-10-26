@@ -6,7 +6,13 @@ import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from scanner import Market, MarketScanner, OrderBook, parse_datetime
+from scanner import (
+    Market,
+    MarketScanner,
+    OrderBook,
+    parse_datetime,
+    select_markets,
+)
 
 
 def raw_market(**overrides):
@@ -185,3 +191,129 @@ class TimeParsingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeHTTP:
+    """Minimal stand-in for httpx.AsyncClient that records the request."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    async def get(self, path, params=None):
+        self.calls.append({"path": path, "params": dict(params or {})})
+
+        class Response:
+            def __init__(self, body):
+                self._body = body
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._body
+
+        return Response(self.payload)
+
+
+class NearResolutionLaneTests(unittest.IsolatedAsyncioTestCase):
+    def make_scanner(self, payload):
+        http = FakeHTTP(payload)
+        scanner = MarketScanner(
+            "https://gamma.invalid",
+            "https://clob.invalid",
+            http_client=http,
+            near_window_hours=6.0,
+            near_overdue_hours=24.0,
+        )
+        return scanner, http
+
+    async def test_asks_gamma_for_markets_closing_soon(self) -> None:
+        now = datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
+        scanner, http = self.make_scanner([raw_market(endDate="2026-10-26T22:00:00Z")])
+        markets = await scanner.scan_near_resolution(now=now, limit=50)
+        params = http.calls[0]["params"]
+        self.assertEqual(http.calls[0]["path"], "/markets")
+        self.assertEqual(params["order"], "endDate")
+        self.assertEqual(params["ascending"], "true")
+        self.assertEqual(params["end_date_min"], "2026-10-25T20:00:00Z")  # overdue window
+        self.assertEqual(params["end_date_max"], "2026-10-27T02:00:00Z")  # +6h
+        self.assertEqual(params["limit"], "50")
+        self.assertEqual(len(markets), 1)
+
+    async def test_keeps_low_volume_markets_the_main_lane_would_drop(self) -> None:
+        scanner, _ = self.make_scanner(
+            [raw_market(volumeNum=120.0, liquidityNum=40.0, endDate="2026-10-26T22:00:00Z")]
+        )
+        markets = await scanner.scan_near_resolution(
+            now=datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
+        )
+        self.assertEqual([m.condition_id for m in markets], ["0xcondition"])
+
+    async def test_unwraps_a_paginated_payload(self) -> None:
+        scanner, _ = self.make_scanner({"data": [raw_market(endDate="2026-10-26T22:00:00Z")]})
+        markets = await scanner.scan_near_resolution(
+            now=datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
+        )
+        self.assertEqual(len(markets), 1)
+
+
+def market(condition_id: str, end_date: datetime | None, volume: float = 10_000.0) -> Market:
+    return Market(
+        condition_id=condition_id,
+        question=f"market {condition_id}",
+        token_yes=f"{condition_id}-yes",
+        token_no=f"{condition_id}-no",
+        volume=volume,
+        liquidity=1_000.0,
+        end_date=end_date,
+    )
+
+
+class SelectMarketsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.now = datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
+        self.volume_lane = [
+            market(f"0xv{i}", self.now + timedelta(days=30), volume=1_000_000.0 - i)
+            for i in range(10)
+        ]
+
+    def test_near_markets_get_reserved_slots(self) -> None:
+        # The bug this fixes: a huge-volume market must not crowd out the one
+        # that closes in an hour.
+        near = [market("0xnear", self.now + timedelta(hours=1), volume=10.0)]
+        chosen = select_markets(self.volume_lane, near, max_total=5, near_slots=2, now=self.now)
+        self.assertEqual(len(chosen), 5)
+        self.assertIn("0xnear", [m.condition_id for m in chosen])
+        self.assertEqual(chosen[0].condition_id, "0xnear")
+
+    def test_nearest_first_and_deduplicated(self) -> None:
+        near = [
+            market("0xlate", self.now + timedelta(hours=5)),
+            market("0xsoon", self.now + timedelta(minutes=30)),
+        ]
+        chosen = select_markets(
+            self.volume_lane + near, near, max_total=6, near_slots=2, now=self.now
+        )
+        ids = [m.condition_id for m in chosen]
+        self.assertEqual(ids[:2], ["0xsoon", "0xlate"])
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_zero_slots_keeps_old_behaviour(self) -> None:
+        near = [market("0xnear", self.now + timedelta(hours=1))]
+        chosen = select_markets(self.volume_lane, near, max_total=3, near_slots=0, now=self.now)
+        self.assertEqual(len(chosen), 3)
+        self.assertNotIn("0xnear", [m.condition_id for m in chosen])
+
+    def test_slots_are_capped_by_the_total_budget(self) -> None:
+        near = [market(f"0xn{i}", self.now + timedelta(hours=i + 1)) for i in range(5)]
+        chosen = select_markets(self.volume_lane, near, max_total=2, near_slots=9, now=self.now)
+        self.assertEqual(len(chosen), 2)
+
+    def test_markets_without_an_end_date_sort_last(self) -> None:
+        near = [
+            market("0xnone", None),
+            market("0xsoon", self.now + timedelta(minutes=10)),
+        ]
+        chosen = select_markets(self.volume_lane, near, max_total=2, near_slots=2, now=self.now)
+        self.assertEqual([m.condition_id for m in chosen], ["0xsoon", "0xnone"])

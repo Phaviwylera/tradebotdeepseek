@@ -233,6 +233,8 @@ opening positions until you restart it — that is deliberate.
 | `/healthz` says `loop: stalled` | no heartbeat for >300 s | the process is up but the pipeline is wedged; read the logs |
 | `/healthz` → `model.loaded: false` | no artifact on the instance | set `MODEL_URL` (diskless hosts) or drop a `model.joblib` at `MODEL_PATH`. ARB + SNIPE still run |
 | `model.error: ModuleNotFoundError: xgboost` | a `full` artifact on an image without `requirements-ml.txt` | retrain with `--backend light`, or build with `--build-arg INSTALL_ML=true` |
+| Signals stay at 0 but `loop: ok` | the gates are rare, by design | read `/healthz` → `gates`: no `near_resolution_candidates`, `markets_in_snipe_band: 0`, or `best_arb_sum` above 0.985. Nothing is broken |
+| `near_resolution_candidates: 0` every cycle | the lane is off or Gamma returned nothing | check `NEAR_RESOLUTION_WINDOW_HOURS`/`SLOTS` are not 0, and that `/healthz` is fresh |
 | Training set has < 60 rows | snapshots only exist after `SNAPSHOT_PATH` is set | capture first, train later; the join reports `too_late`/`no_label` counts |
 | `Risk blocked` rows | exposure/daily-loss caps | expected; inspect `reason` in the signals table |
 | xgboost missing at model load | artifact trained with ML extras | `pip install -r requirements-ml.txt` |

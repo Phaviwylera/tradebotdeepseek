@@ -77,6 +77,10 @@ class Settings:
     news_sentiment: float
 
     min_ev: float
+    snipe_overdue_hours: float
+    near_resolution_slots: int
+    near_resolution_window_hours: float
+    near_resolution_overdue_hours: float
     signature_type: int
     funder: str
     cancel_on_shutdown: bool
@@ -126,6 +130,10 @@ class Settings:
             stream_backoff_seconds=_env_float("STREAM_BACKOFF_SECONDS", 2.0, minimum=0.1),
             news_sentiment=_env_float("NEWS_SENTIMENT", 0.0),
             min_ev=_env_float("MIN_EV", 0.02),
+            snipe_overdue_hours=_env_float("SNIPE_OVERDUE_HOURS", 24.0),
+            near_resolution_slots=_env_int("NEAR_RESOLUTION_SLOTS", 8, minimum=0),
+            near_resolution_window_hours=_env_float("NEAR_RESOLUTION_WINDOW_HOURS", 6.0),
+            near_resolution_overdue_hours=_env_float("NEAR_RESOLUTION_OVERDUE_HOURS", 24.0),
             signature_type=signature_type,
             funder=os.getenv("POLYMARKET_FUNDER", "").strip(),
             cancel_on_shutdown=_env_bool("CANCEL_ON_SHUTDOWN", True),
@@ -158,6 +166,8 @@ class Settings:
             "model_path": str(self.model_path),
             "model_url_configured": bool(self.model_url),
             "snapshot_path": str(self.snapshot_path) if self.snapshot_path else None,
+            "near_resolution_slots": self.near_resolution_slots,
+            "near_resolution_window_hours": self.near_resolution_window_hours,
             "scan_interval_seconds": self.scan_interval_seconds,
             "max_markets_per_cycle": self.max_markets_per_cycle,
             "signal_cooldown_seconds": self.signal_cooldown_seconds,

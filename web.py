@@ -216,7 +216,35 @@ def build_status(ledger_path: Path, limit: int = DEFAULT_LIMIT) -> dict[str, Any
     }
 
 
-def build_health(ledger_path: Path, model_info: dict[str, Any] | None = None) -> dict[str, Any]:
+DIAGNOSTIC_KEYS = (
+    "near_resolution_candidates",
+    "near_resolution_selected",
+    "markets_in_snipe_band",
+    "closest_snipe_price",
+    "best_arb_sum",
+    "closest_ttl_hours",
+)
+
+
+def summarize_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Aggregate gate proximity, no market identifiers or prices of positions."""
+    if diagnostics is None:
+        return None
+    summary = {key: diagnostics.get(key) for key in DIAGNOSTIC_KEYS}
+    closest = summary.get("closest_snipe_price")
+    if isinstance(closest, dict):
+        summary["closest_snipe_price"] = {
+            "ask": closest.get("ask"),
+            "distance": closest.get("distance"),
+        }
+    return summary
+
+
+def build_health(
+    ledger_path: Path,
+    model_info: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Public, secret-free answer to "is the trading loop actually running?".
 
     ``/healthz`` is the only route that never asks for a token: Render polls it,
@@ -246,6 +274,7 @@ def build_health(ledger_path: Path, model_info: dict[str, Any] | None = None) ->
         "killed": None,
         "last_error": None,
         "model": summarize_model(model_info),
+        "gates": summarize_diagnostics(diagnostics),
     }
     try:
         payload.update(health_detail(ledger_path))
@@ -378,6 +407,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     ledger_path: Path = Path("ledger.db")
     dashboard_token: str = ""
     model_info: dict[str, Any] | None = None
+    diagnostics: dict[str, Any] | None = None
     allowed_origin: str = ""
     dashboard_dir: Path | None = None
 
@@ -476,7 +506,10 @@ class StatusHandler(BaseHTTPRequestHandler):
             # Public and always 200: Render restarts a service whose health check
             # fails, and the loop's vitals are what tell a token-less user
             # whether anything is actually happening.
-            self._send(200, build_health(self.ledger_path, self.model_info))
+            self._send(
+                200,
+                build_health(self.ledger_path, self.model_info, self.diagnostics),
+            )
             return
 
         if path.startswith("/api/"):
@@ -539,6 +572,7 @@ def create_server(
     allowed_origin: str = "",
     dashboard_dir: Path | None = None,
     model_info: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
     handler: type[StatusHandler] = StatusHandler,
 ) -> StatusHTTPServer:
     """Build (but do not start) a bound read-only status server."""
@@ -559,6 +593,7 @@ def create_server(
             "allowed_origin": allowed_origin,
             "dashboard_dir": resolved_dir,
             "model_info": model_info,
+            "diagnostics": diagnostics,
         },
     )
     return StatusHTTPServer((host, port), bound_handler)
@@ -597,6 +632,7 @@ def start_status_server(
     dashboard_dir: str | Path | None = None,
     serve_dashboard: bool | None = None,
     model_info: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> tuple[StatusHTTPServer, threading.Thread]:
     """Start the read-only server on a daemon thread and return it."""
     resolved_host, resolved_port = resolve_bind()
@@ -629,6 +665,7 @@ def start_status_server(
         allowed_origin=origin,
         dashboard_dir=directory if serve_dashboard else None,
         model_info=model_info,
+        diagnostics=diagnostics,
     )
     actual_host, actual_port = server.server_address[:2]
     if actual_host not in {"127.0.0.1", "::1", "localhost"} and not token:

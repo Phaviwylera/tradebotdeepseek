@@ -79,11 +79,14 @@ class Settings:
     funder: str
     cancel_on_shutdown: bool
 
+    web_enabled: bool
+    api_host: str
+    api_port: int
+    serve_dashboard: bool
+
     @classmethod
     def from_env(cls) -> Settings:
-        gamma_api_url = os.getenv(
-            "GAMMA_API_URL", "https://gamma-api.polymarket.com"
-        ).rstrip("/")
+        gamma_api_url = os.getenv("GAMMA_API_URL", "https://gamma-api.polymarket.com").rstrip("/")
         clob_host = os.getenv("CLOB_HOST", "https://clob.polymarket.com").rstrip("/")
         ws_market_url = os.getenv(
             "WS_MARKET_URL",
@@ -107,29 +110,23 @@ class Settings:
             ledger_path=Path(os.getenv("LEDGER_PATH", "ledger.db")),
             model_path=Path(os.getenv("MODEL_PATH", "model.joblib")),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
-            scan_interval_seconds=_env_int(
-                "SCAN_INTERVAL_SECONDS", 60, minimum=10
-            ),
+            scan_interval_seconds=_env_int("SCAN_INTERVAL_SECONDS", 60, minimum=10),
             error_sleep_seconds=_env_int("ERROR_SLEEP_SECONDS", 10, minimum=1),
             scan_page_size=_env_int("SCAN_PAGE_SIZE", 100, minimum=1),
             scan_max_pages=_env_int("SCAN_MAX_PAGES", 5, minimum=1),
-            max_markets_per_cycle=_env_int(
-                "MAX_MARKETS_PER_CYCLE", 40, minimum=1
-            ),
-            book_staleness_seconds=_env_int(
-                "BOOK_STALENESS_SECONDS", 20, minimum=1
-            ),
-            signal_cooldown_seconds=_env_int(
-                "SIGNAL_COOLDOWN_SECONDS", 3600, minimum=0
-            ),
-            stream_backoff_seconds=_env_float(
-                "STREAM_BACKOFF_SECONDS", 2.0, minimum=0.1
-            ),
+            max_markets_per_cycle=_env_int("MAX_MARKETS_PER_CYCLE", 40, minimum=1),
+            book_staleness_seconds=_env_int("BOOK_STALENESS_SECONDS", 20, minimum=1),
+            signal_cooldown_seconds=_env_int("SIGNAL_COOLDOWN_SECONDS", 3600, minimum=0),
+            stream_backoff_seconds=_env_float("STREAM_BACKOFF_SECONDS", 2.0, minimum=0.1),
             news_sentiment=_env_float("NEWS_SENTIMENT", 0.0),
             min_ev=_env_float("MIN_EV", 0.02),
             signature_type=signature_type,
             funder=os.getenv("POLYMARKET_FUNDER", "").strip(),
             cancel_on_shutdown=_env_bool("CANCEL_ON_SHUTDOWN", True),
+            web_enabled=_env_bool("WEB_ENABLED", True),
+            api_host=os.getenv("API_HOST", "").strip(),
+            api_port=_env_int("API_PORT", 0),
+            serve_dashboard=_env_bool("SERVE_DASHBOARD", True),
         )
 
         for name in ("max_daily_loss_pct", "max_drawdown_pct", "max_exposure_pct"):
@@ -158,4 +155,8 @@ class Settings:
             "signal_cooldown_seconds": self.signal_cooldown_seconds,
             "signature_type": self.signature_type,
             "funder_configured": bool(self.funder),
+            "web_enabled": self.web_enabled,
+            "api_host": self.api_host or "auto",
+            "api_port": self.api_port or "auto",
+            "serve_dashboard": self.serve_dashboard,
         }

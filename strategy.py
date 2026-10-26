@@ -28,13 +28,25 @@ class Signal:
 
 
 class StrategyEngine:
-    def __init__(self, min_ev: float = 0.02, max_bet: float = 20.0) -> None:
+    def __init__(
+        self,
+        min_ev: float = 0.02,
+        max_bet: float = 20.0,
+        snipe_overdue_hours: float = 24.0,
+    ) -> None:
         if min_ev < 0:
             raise ValueError("min_ev must be non-negative")
         if max_bet <= 0:
             raise ValueError("max_bet must be positive")
+        if snipe_overdue_hours < 0:
+            raise ValueError("snipe_overdue_hours must be non-negative")
         self.min_ev = float(min_ev)
         self.max_bet = float(max_bet)
+        # Gamma's endDate is the scheduled close. For a sports market that is the
+        # kick-off, so a match that is still being played has a *negative* ttl —
+        # exactly the window where a 0.93 ask means "almost certainly resolves
+        # YES". Rejecting ttl < 0 hid the whole in-play case.
+        self.snipe_overdue_hours = float(snipe_overdue_hours)
 
     def check_arbitrage(
         self, market: Market, yes_book: OrderBook, no_book: OrderBook
@@ -99,13 +111,18 @@ class StrategyEngine:
         """
         return min(SNIPE_MAX_ASK, SNIPE_HOLD_PROBABILITY / (1.0 + self.min_ev))
 
+    def snipe_band(self) -> tuple[float, float]:
+        """Half-open ask range the snipe strategy can actually trade."""
+        return max(SNIPE_MIN_ASK, 0.0), self.snipe_max_ask()
+
     def describe_gates(self) -> str:
         """One line a log can print so "why is it quiet?" is answerable."""
         low = max(SNIPE_MIN_ASK, 0.0)
         high = self.snipe_max_ask()
         return (
             f"ARB fires when yes_ask + no_ask < {ARBITRAGE_THRESHOLD:.3f}; "
-            f"SNIPE fires when ttl_days < {SNIPE_MAX_TTL_DAYS:.2f} and the best ask "
+            f"SNIPE fires when ttl_days < {SNIPE_MAX_TTL_DAYS:.2f} (or up to "
+            f"{self.snipe_overdue_hours:.0f}h past the scheduled close) and the best ask "
             f"is in [{low:.4f}, {high:.4f}) with hold={SNIPE_HOLD_PROBABILITY:.2f} "
             f"min_ev={self.min_ev:.4f}"
             + ("" if high > low else " (this band is empty: raise SNIPE hold or lower MIN_EV)")
@@ -126,7 +143,13 @@ class StrategyEngine:
         """
         current = now or datetime.now(timezone.utc)
         ttl_days = market.ttl_days(current)
-        if ttl_days is None or ttl_days < 0.0 or ttl_days >= SNIPE_MAX_TTL_DAYS:
+        if ttl_days is None or ttl_days >= SNIPE_MAX_TTL_DAYS:
+            return []
+        # Past the scheduled close but not yet resolved (in-play, or awaiting
+        # settlement): still inside the thesis, up to a bounded lateness so a
+        # permanently stuck market cannot be bought forever.
+        overdue_floor = -self.snipe_overdue_hours / 24.0
+        if ttl_days < overdue_floor:
             return []
 
         candidates: list[Signal] = []

@@ -376,3 +376,39 @@ class HealthProbeTests(unittest.TestCase):
         payload = web.build_health(broken)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["loop"], "unknown")
+
+
+class GateDiagnosticsTests(unittest.TestCase):
+    """`/healthz` must explain "no signals" without giving the token away."""
+
+    def test_summary_keeps_only_aggregates(self) -> None:
+        summary = web.summarize_diagnostics(
+            {
+                "near_resolution_candidates": 7,
+                "near_resolution_selected": 4,
+                "markets_in_snipe_band": 0,
+                "closest_snipe_price": {"ask": 0.9123, "distance": 0.0177, "token_id": "leak"},
+                "best_arb_sum": 0.9902,
+                "closest_ttl_hours": 3.5,
+                "secret": "x",
+            }
+        )
+        assert summary is not None
+        self.assertEqual(summary["near_resolution_candidates"], 7)
+        self.assertEqual(summary["closest_snipe_price"], {"ask": 0.9123, "distance": 0.0177})
+        self.assertNotIn("secret", summary)
+
+    def test_no_diagnostics_means_null_not_empty(self) -> None:
+        self.assertIsNone(web.summarize_diagnostics(None))
+
+    def test_health_includes_the_gates_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = web.build_health(
+                Path(tmp) / "missing.db",
+                None,
+                {"near_resolution_candidates": 3, "markets_in_snipe_band": 1},
+            )
+        self.assertEqual(payload["gates"]["near_resolution_candidates"], 3)
+        self.assertEqual(payload["gates"]["markets_in_snipe_band"], 1)
+        self.assertIsNone(payload["model"])
+        self.assertTrue(payload["ok"])

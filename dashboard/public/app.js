@@ -459,6 +459,7 @@ function describeHealth(health) {
       : model.error
         ? ` Model unavailable: ${model.error}.`
         : " Model off, so only ARB + SNIPE are looking for edge.";
+  const gatesNote = describeGates(health.gates);
   const loopSentence = Number.isFinite(stale)
     ? `last cycle ${formatDuration(stale)} ago`
     : "last cycle time unknown";
@@ -507,8 +508,38 @@ function describeHealth(health) {
   return {
     tone: "info",
     title: `Token required — but the bot is running (${mode})`,
-    text: `Live from /healthz: ${loopSentence}; ${cycleSentence}. Total ${totals}.${dryRunNote}${modelNote} ${tokenHint} The cards and tables below are sample data, not its results.`,
+    text: `Live from /healthz: ${loopSentence}; ${cycleSentence}. Total ${totals}.${dryRunNote}${modelNote}${gatesNote} ${tokenHint} The cards and tables below are sample data, not its results.`,
   };
+}
+
+// Explain a quiet cycle with the numbers the bot actually measured, so
+// "no signals" never has to be a mystery.
+function describeGates(gates) {
+  if (!gates || typeof gates !== "object") return "";
+  const near = Number(gates.near_resolution_candidates);
+  const selected = Number(gates.near_resolution_selected);
+  const inBand = Number(gates.markets_in_snipe_band);
+  const arb = Number(gates.best_arb_sum);
+  const closest = gates.closest_snipe_price;
+
+  const parts = [];
+  if (Number.isFinite(near)) {
+    parts.push(
+      `${near} market${near === 1 ? "" : "s"} closing soon found` +
+        (Number.isFinite(selected) ? `, ${selected} evaluated` : ""),
+    );
+  }
+  if (Number.isFinite(inBand)) {
+    parts.push(`${inBand} inside the snipe price band (0.93–0.9314)`);
+  }
+  if (Number.isFinite(arb)) {
+    parts.push(`cheapest YES+NO pair ${arb.toFixed(4)} (needs < 0.985)`);
+  }
+  if (closest && Number.isFinite(Number(closest.ask))) {
+    parts.push(`nearest snipe ask ${Number(closest.ask).toFixed(4)}`);
+  }
+  if (!parts.length) return "";
+  return ` Gates: ${parts.join("; ")}.`;
 }
 
 function showNotice({ tone, title, text, actionLabel, action }) {

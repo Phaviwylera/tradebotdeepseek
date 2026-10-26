@@ -76,8 +76,13 @@ A `401` is not a dead end. The proxy also reads the bot's **public** `/healthz`
               "markets_scanned": 20, "markets_evaluated": 18,
               "signals_last_cycle": 2,
               "counts": { "signals_total": 41, "signals_24h": 12, "orders_total": 0 },
-              "last_error": null } }
+              "last_error": null,
+              "model": { "loaded": false, "backend": null, "error": null } } }
 ```
+
+The `model` block is what makes "three strategies" auditable: `loaded: false`
+means only ARB + SNIPE are looking for edge, and `error` carries the real
+exception when an artifact failed to load.
 
 So the banner can say "the bot is running, last cycle 12s ago, 2 signals, 0 orders
 because it is DRY-RUN" instead of only showing sample data, and a real failure

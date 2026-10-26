@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import web
 from config import Settings
@@ -26,6 +27,7 @@ from ledger import Ledger
 from model import ProbabilityModel
 from risk import RiskManager
 from scanner import Market, MarketScanner, OrderBook
+from snapshots import SnapshotRecorder
 from strategy import Signal, StrategyEngine
 from stream import BookStream
 
@@ -73,6 +75,8 @@ class TradingBot:
         self._stop = asyncio.Event()
         self._shutdown_done = False
         self._status_server: web.StatusHTTPServer | None = None
+        self.model_info: dict[str, Any] = {}
+        self.snapshots = SnapshotRecorder(getattr(settings, "snapshot_path", None))
         self._status_thread: threading.Thread | None = None
         self.stream = BookStream(
             [],
@@ -95,6 +99,12 @@ class TradingBot:
         # Without this, an idle console looks like a fault. The gates explain a
         # quiet bot: both remaining strategies are deliberately rare.
         logger.info("Signal gates: %s", self.strategy.describe_gates())
+        if self.snapshots.enabled:
+            logger.info(
+                "Feature snapshots -> %s (for training_data; %d rows so far)",
+                self.snapshots.path,
+                self.snapshots.rows_written,
+            )
 
         await asyncio.to_thread(self.executor.initialize)
         self.stream.start()
@@ -170,6 +180,7 @@ class TradingBot:
                 host=self.settings.api_host or None,
                 port=self.settings.api_port or None,
                 serve_dashboard=self.settings.serve_dashboard,
+                model_info=self.model_info,
             )
         except OSError:
             # A busy port must never stop the trading loop.
@@ -245,6 +256,16 @@ class TradingBot:
         self, market: Market, yes_book: OrderBook, no_book: OrderBook
     ) -> int:
         generated = 0
+
+        # Capture the inputs before acting on them: this row is training data
+        # only if it was written while the market was still unresolved.
+        if self.snapshots.enabled:
+            await asyncio.to_thread(
+                self.snapshots.record,
+                market,
+                yes_book,
+                news_sentiment=self.settings.news_sentiment,
+            )
 
         arbitrage = self.strategy.check_arbitrage(market, yes_book, no_book)
         if arbitrage:
@@ -553,29 +574,74 @@ class TradingBot:
             self._books.pop(token_id, None)
 
 
-def _load_model(settings: Settings) -> ProbabilityModel:
+def _load_model(settings: Settings) -> tuple[ProbabilityModel, dict[str, Any]]:
+    """Load the model artifact, fetching it from MODEL_URL when needed.
+
+    Returns the model plus a small dict the status API publishes, so ``/healthz``
+    can say whether the MODEL strategy is actually participating: a quiet bot
+    with two strategies running is a very different thing from a quiet bot with
+    three, and without this the difference was only visible in the startup log.
+    """
     model = ProbabilityModel()
+    info: dict[str, Any] = {
+        "loaded": False,
+        "path": str(settings.model_path),
+        "source": None,
+        "backend": None,
+        "trained_at": None,
+        "samples": None,
+        "positive_rate": None,
+        "error": None,
+    }
+
+    if not settings.model_path.exists() and settings.model_url:
+        try:
+            ProbabilityModel.fetch_artifact(settings.model_url, settings.model_path)
+            info["source"] = "downloaded"
+        except Exception as exc:  # noqa: BLE001 - any failure keeps the bot trading
+            logger.exception("Could not download the model from MODEL_URL")
+            info["error"] = f"download failed: {type(exc).__name__}: {exc}"
+
     try:
         if model.load(settings.model_path):
-            logger.info("Calibrated model enabled")
+            info.update(
+                {
+                    "loaded": True,
+                    "source": info["source"] or "disk",
+                    "backend": model.metadata.get("backend"),
+                    "trained_at": model.metadata.get("trained_at"),
+                    "samples": model.metadata.get("samples"),
+                    "positive_rate": model.metadata.get("positive_rate"),
+                }
+            )
+            logger.info(
+                "Calibrated model enabled (backend=%s trained_at=%s samples=%s)",
+                info["backend"] or "unknown",
+                info["trained_at"] or "unknown",
+                info["samples"] or "unknown",
+            )
         else:
+            info["source"] = info["source"] or "absent"
             logger.warning(
-                "No model at %s; running ARBITRAGE + SNIPE strategies only",
+                "No model at %s; running ARBITRAGE + SNIPE strategies only"
+                " (set MODEL_URL to fetch an artifact at startup)",
                 settings.model_path,
             )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - a bad artifact must not stop trading
         logger.exception(
             "Failed to load model at %s; running ARBITRAGE + SNIPE only",
             settings.model_path,
         )
-    return model
+        info["source"] = info["source"] or "disk"
+        info["error"] = f"load failed: {type(exc).__name__}: {exc}"
+    return model, info
 
 
 async def async_main() -> None:
     settings = Settings.from_env()
     configure_logging(settings.log_level)
 
-    model = _load_model(settings)
+    model, model_info = _load_model(settings)
     ledger = Ledger(settings.ledger_path)
     scanner = MarketScanner(
         settings.gamma_api_url,
@@ -608,6 +674,7 @@ async def async_main() -> None:
         model=model,
         executor=executor,
     )
+    bot.model_info = model_info
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

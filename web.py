@@ -216,7 +216,7 @@ def build_status(ledger_path: Path, limit: int = DEFAULT_LIMIT) -> dict[str, Any
     }
 
 
-def build_health(ledger_path: Path) -> dict[str, Any]:
+def build_health(ledger_path: Path, model_info: dict[str, Any] | None = None) -> dict[str, Any]:
     """Public, secret-free answer to "is the trading loop actually running?".
 
     ``/healthz`` is the only route that never asks for a token: Render polls it,
@@ -245,6 +245,7 @@ def build_health(ledger_path: Path) -> dict[str, Any]:
         "counts": {"signals_total": None, "signals_24h": None, "orders_total": None},
         "killed": None,
         "last_error": None,
+        "model": summarize_model(model_info),
     }
     try:
         payload.update(health_detail(ledger_path))
@@ -254,6 +255,22 @@ def build_health(ledger_path: Path) -> dict[str, Any]:
     payload["ok"] = True
     payload["server_time"] = utc_iso()
     return payload
+
+
+MODEL_KEYS = ("loaded", "source", "backend", "trained_at", "samples", "positive_rate", "error")
+
+
+def summarize_model(model_info: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Public shape of the model state, or ``None`` when it was never reported.
+
+    ``None`` means "this process cannot see the model" (a standalone
+    ``dashboard_api.py`` sidecar), which is different from "the model failed".
+    """
+    if model_info is None:
+        return None
+    summary = {key: model_info.get(key) for key in MODEL_KEYS}
+    summary["loaded"] = bool(model_info.get("loaded"))
+    return summary
 
 
 def health_detail(ledger_path: Path) -> dict[str, Any]:
@@ -360,6 +377,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     # Injected by ``create_server``.
     ledger_path: Path = Path("ledger.db")
     dashboard_token: str = ""
+    model_info: dict[str, Any] | None = None
     allowed_origin: str = ""
     dashboard_dir: Path | None = None
 
@@ -458,7 +476,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             # Public and always 200: Render restarts a service whose health check
             # fails, and the loop's vitals are what tell a token-less user
             # whether anything is actually happening.
-            self._send(200, build_health(self.ledger_path))
+            self._send(200, build_health(self.ledger_path, self.model_info))
             return
 
         if path.startswith("/api/"):
@@ -520,6 +538,7 @@ def create_server(
     dashboard_token: str = "",
     allowed_origin: str = "",
     dashboard_dir: Path | None = None,
+    model_info: dict[str, Any] | None = None,
     handler: type[StatusHandler] = StatusHandler,
 ) -> StatusHTTPServer:
     """Build (but do not start) a bound read-only status server."""
@@ -539,6 +558,7 @@ def create_server(
             "dashboard_token": dashboard_token,
             "allowed_origin": allowed_origin,
             "dashboard_dir": resolved_dir,
+            "model_info": model_info,
         },
     )
     return StatusHTTPServer((host, port), bound_handler)
@@ -576,6 +596,7 @@ def start_status_server(
     dashboard_token: str | None = None,
     dashboard_dir: str | Path | None = None,
     serve_dashboard: bool | None = None,
+    model_info: dict[str, Any] | None = None,
 ) -> tuple[StatusHTTPServer, threading.Thread]:
     """Start the read-only server on a daemon thread and return it."""
     resolved_host, resolved_port = resolve_bind()
@@ -607,6 +628,7 @@ def start_status_server(
         dashboard_token=token,
         allowed_origin=origin,
         dashboard_dir=directory if serve_dashboard else None,
+        model_info=model_info,
     )
     actual_host, actual_port = server.server_address[:2]
     if actual_host not in {"127.0.0.1", "::1", "localhost"} and not token:

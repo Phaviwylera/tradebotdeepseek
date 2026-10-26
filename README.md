@@ -239,6 +239,8 @@ network, no account. The console is also deployed publicly from
 | `MIN_EV` | `0.02` | Minimum edge/return threshold. |
 | `LEDGER_PATH` | `ledger.db` | SQLite file. Falls back to `/tmp/polymarket-bot/` with a warning if the path is not writable. |
 | `MODEL_PATH` | `model.joblib` | Optional calibrated model artifact. |
+| `MODEL_URL` | *(empty)* | Download the artifact at startup when `MODEL_PATH` is absent. How a diskless host gets a model. |
+| `SNAPSHOT_PATH` | *(empty)* | Append pre-resolution feature snapshots (training data). Off by default; needs a disk. |
 | `SCAN_INTERVAL_SECONDS` | `60` | Pipeline cadence. |
 | `MAX_MARKETS_PER_CYCLE` | `40` | Book/strategy working set. |
 | `SIGNAL_COOLDOWN_SECONDS` | `3600` | Per-market/strategy dedupe window. |
@@ -403,7 +405,41 @@ See [docs/DEPLOY.md](docs/DEPLOY.md) for the complete playbook.
 
 ## Training and swapping in `model.joblib`
 
-Training data must be built from historical, point-in-time market snapshots.
+The MODEL strategy only runs when an artifact is present. Everything below is
+the honest path to one — including the part most projects skip: **where the
+training data comes from**.
+
+### 1. Capture pre-resolution snapshots
+
+A closed market's Gamma record reports its *final* prices (1 and 0). Build
+features from those and the label is inside the feature vector: the model
+backtests perfectly and predicts nothing. There is no historical archive to fall
+back on, so the bot has to record the inputs while markets are still open:
+
+```bash
+SNAPSHOT_PATH=/data/snapshots.csv python main.py
+```
+
+One CSV row per evaluated market per cycle (`condition_id, captured_at,
+end_date` plus the ten features). Off by default; ~5 MB/day at twenty markets a
+minute, so keep it on a host with a disk (`deploy/render-starter.yaml` or EC2),
+not the ephemeral free tier.
+
+### 2. Fetch the outcomes and join them
+
+```bash
+# labels only: which way resolved markets actually settled
+python scripts/fetch_resolved_markets.py --out resolved.csv --pages 10
+
+# join: last snapshot per market taken >= 30 min before resolution
+python scripts/fetch_resolved_markets.py \
+    --snapshots /data/snapshots.csv --labels resolved.csv --out training.csv
+```
+
+The join drops any snapshot captured at or after resolution, and reports why
+rows were discarded (`no_label`, `too_late`, `no_timestamp`) so a thin dataset
+has a visible cause. Training needs at least 60 usable rows.
+
 Every row needs the ten features in `features.py` plus `resolved_yes`:
 
 ```csv
@@ -415,23 +451,46 @@ Do not build labels from the same snapshot used to construct features without
 respecting resolution time. Do not use random train/test splits.
 
 ```bash
-python train_model.py --data resolved_markets.csv --output model.joblib
+# light: scikit-learn only, small enough to load on a 512 MB free instance
+python train_model.py --data training.csv --output model.joblib --backend light
+
+# full: XGBoost + LightGBM + sklearn, stronger but needs requirements-ml.txt
+pip install -r requirements-ml.txt
+python train_model.py --data training.csv --output model.joblib --backend full
 ```
 
 The script prints an out-of-time holdout report including Brier score, log loss,
 AUC, and 10-bin expected calibration error (ECE). It warns when ECE exceeds
 0.10. Use the artifact only after reviewing calibration and sample size.
 
-To enable it:
+### 3. Deliver the artifact to the bot
 
-- Local: put it at `MODEL_PATH`.
-- Render/EC2: place it at `/var/data/model.joblib` on the persistent disk, or
-  build an image that includes it (`--build-arg INSTALL_ML=true`). The file is
-  gitignored by default so model artifacts do not accidentally enter source
-  control. A model trained with xgboost/lightgbm needs those wheels installed to
-  load: `pip install -r requirements-ml.txt`.
-- Restart the worker. Logs should say `Calibrated model enabled`; otherwise the
-  bot will report the degraded mode.
+| Where the bot runs | How the model gets there |
+|---|---|
+| local | put it at `MODEL_PATH` |
+| EC2 / Docker with a volume | drop it at `/var/data/model.joblib` |
+| **free host, no disk** | set `MODEL_URL` — the bot downloads it to `MODEL_PATH` at startup |
+
+`MODEL_URL` can be a GitHub release asset, a raw file, or any static host. The
+download is atomic (`.part` then rename) and size-capped, so a wrong URL can
+neither be half-loaded nor fill the instance. The artifact stays out of source
+control (`*.joblib` is gitignored); a `light` artifact is a few MB.
+
+Verify, do not assume: `/healthz` reports what actually loaded —
+
+```json
+"model": {"loaded": true, "source": "downloaded", "backend": "light",
+          "trained_at": "2026-10-26T...", "samples": 812, "error": null}
+```
+
+`"loaded": false` with `"source": "absent"` means only ARB + SNIPE are running,
+and the console banner says so. `"error"` carries the real exception (typically
+`ModuleNotFoundError: xgboost` when a `full` artifact is served by an image
+without `requirements-ml.txt`).
+
+Do not force it: if the holdout report shows ECE above 0.10, or a Brier score
+no better than a constant base rate, the model adds noise, not edge. Leave it
+off.
 
 The model predicts P(YES resolves true). Training samples must be chronological
 and free of outcome leakage. A model that is accurate but poorly calibrated is

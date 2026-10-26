@@ -62,6 +62,8 @@ class Settings:
 
     ledger_path: Path
     model_path: Path
+    model_url: str
+    snapshot_path: Path | None
     log_level: str
 
     scan_interval_seconds: int
@@ -109,6 +111,10 @@ class Settings:
             ws_market_url=ws_market_url,
             ledger_path=Path(os.getenv("LEDGER_PATH", "ledger.db")),
             model_path=Path(os.getenv("MODEL_PATH", "model.joblib")),
+            model_url=os.getenv("MODEL_URL", "").strip(),
+            snapshot_path=Path(snapshot_path)
+            if (snapshot_path := os.getenv("SNAPSHOT_PATH", "").strip())
+            else None,
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             scan_interval_seconds=_env_int("SCAN_INTERVAL_SECONDS", 60, minimum=10),
             error_sleep_seconds=_env_int("ERROR_SLEEP_SECONDS", 10, minimum=1),
@@ -150,6 +156,8 @@ class Settings:
             "max_exposure_pct": self.max_exposure_pct,
             "ledger_path": str(self.ledger_path),
             "model_path": str(self.model_path),
+            "model_url_configured": bool(self.model_url),
+            "snapshot_path": str(self.snapshot_path) if self.snapshot_path else None,
             "scan_interval_seconds": self.scan_interval_seconds,
             "max_markets_per_cycle": self.max_markets_per_cycle,
             "signal_cooldown_seconds": self.signal_cooldown_seconds,

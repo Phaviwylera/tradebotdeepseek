@@ -132,9 +132,22 @@ class TimeSeriesStackingClassifier(ClassifierMixin, BaseEstimator):
         return (probabilities[:, positive_index] >= 0.5).astype(int)
 
 
-def _build_estimator() -> Any:
-    """Construct the required time-ordered stack lazily."""
-    from lightgbm import LGBMClassifier
+BACKENDS = ("full", "light")
+
+
+def _build_estimator(backend: str = "full") -> Any:
+    """Construct the time-ordered stack lazily.
+
+    ``backend="full"`` is the reference ensemble: XGBoost + LightGBM + sklearn.
+    It needs ``requirements-ml.txt`` (~1.5 GB with xgboost's CUDA runtime), which
+    does not fit the 512 MB free Render instance.
+
+    ``backend="light"`` is the same design — five-ish base learners, out-of-fold
+    stacking, logistic meta-model, isotonic calibration over chronological folds
+    — built only from scikit-learn. The artifact is a fraction of the size, the
+    image stays small, and it can be trained and served on a free host. It is a
+    slightly weaker learner; that is the honest trade, not a free lunch.
+    """
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.ensemble import (
         ExtraTreesClassifier,
@@ -143,36 +156,10 @@ def _build_estimator() -> Any:
     )
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import TimeSeriesSplit
-    from xgboost import XGBClassifier
 
-    xgb = XGBClassifier(
-        n_estimators=350,
-        max_depth=4,
-        learning_rate=0.04,
-        subsample=0.85,
-        colsample_bytree=0.85,
-        min_child_weight=3,
-        reg_lambda=2.0,
-        objective="binary:logistic",
-        eval_metric="logloss",
-        tree_method="hist",
-        n_jobs=1,
-        random_state=42,
-    )
-    lgbm = LGBMClassifier(
-        n_estimators=350,
-        num_leaves=31,
-        learning_rate=0.04,
-        subsample=0.85,
-        colsample_bytree=0.85,
-        min_child_samples=20,
-        reg_lambda=2.0,
-        objective="binary",
-        n_jobs=1,
-        random_state=42,
-        verbosity=-1,
-        force_col_wise=True,
-    )
+    if backend not in BACKENDS:
+        raise ValueError(f"backend must be one of {BACKENDS}, got {backend!r}")
+
     hgb = HistGradientBoostingClassifier(
         max_iter=350,
         learning_rate=0.05,
@@ -197,14 +184,57 @@ def _build_estimator() -> Any:
         class_weight="balanced_subsample",
     )
 
+    base_estimators: list[tuple[str, Any]] = [
+        ("hgb", hgb),
+        ("extra_trees", extra),
+        ("random_forest", forest),
+    ]
+    if backend == "full":
+        # Imported here, not at module scope: a deployment that only loads a
+        # `light` artifact must not need xgboost or lightgbm installed at all.
+        from lightgbm import LGBMClassifier
+        from xgboost import XGBClassifier
+
+        base_estimators = [
+            (
+                "xgb",
+                XGBClassifier(
+                    n_estimators=350,
+                    max_depth=4,
+                    learning_rate=0.04,
+                    subsample=0.85,
+                    colsample_bytree=0.85,
+                    min_child_weight=3,
+                    reg_lambda=2.0,
+                    objective="binary:logistic",
+                    eval_metric="logloss",
+                    tree_method="hist",
+                    n_jobs=1,
+                    random_state=42,
+                ),
+            ),
+            (
+                "lgbm",
+                LGBMClassifier(
+                    n_estimators=350,
+                    num_leaves=31,
+                    learning_rate=0.04,
+                    subsample=0.85,
+                    colsample_bytree=0.85,
+                    min_child_samples=20,
+                    reg_lambda=2.0,
+                    objective="binary",
+                    n_jobs=1,
+                    random_state=42,
+                    verbosity=-1,
+                    force_col_wise=True,
+                ),
+            ),
+            *base_estimators,
+        ]
+
     stacking = TimeSeriesStackingClassifier(
-        base_estimators=[
-            ("xgb", xgb),
-            ("lgbm", lgbm),
-            ("hgb", hgb),
-            ("extra_trees", extra),
-            ("random_forest", forest),
-        ],
+        base_estimators=base_estimators,
         final_estimator=LogisticRegression(C=0.5, max_iter=2_000, class_weight="balanced"),
         n_splits=5,
         passthrough=True,
@@ -236,6 +266,7 @@ class ProbabilityModel:
         *,
         timestamps: Sequence[Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        backend: str = "full",
     ) -> ProbabilityModel:
         """Fit on chronologically ordered rows (oldest first)."""
         if self.feature_columns:
@@ -268,7 +299,7 @@ class ProbabilityModel:
         medians = frame.median(numeric_only=True)
         frame = frame.fillna(medians).fillna(0.0)
 
-        estimator = _build_estimator()
+        estimator = _build_estimator(backend)
         estimator.fit(frame, labels)
         self.model = estimator
         self.feature_columns = list(frame.columns)
@@ -278,6 +309,7 @@ class ProbabilityModel:
             "samples": len(frame),
             "positive_rate": float(labels.mean()),
             "model_bundle_version": MODEL_BUNDLE_VERSION,
+            "backend": backend,
         }
         if metadata:
             model_metadata.update(metadata)
@@ -334,6 +366,55 @@ class ProbabilityModel:
         joblib.dump(bundle, temporary)
         os.replace(temporary, destination)
         logger.info("Saved model to %s", destination)
+        return destination
+
+    @staticmethod
+    def fetch_artifact(
+        url: str,
+        path: str | Path,
+        *,
+        timeout: float = 120.0,
+        max_bytes: int = 200 * 1024 * 1024,
+    ) -> Path:
+        """Download a model artifact to ``path`` atomically.
+
+        A free host has no persistent disk and no build step that trains, so the
+        artifact has to arrive at runtime. ``MODEL_URL`` points at a release
+        asset, a raw file, or any static host. The write is atomic (temp file
+        then ``os.replace``) so a half-downloaded file can never be loaded, and
+        the size is capped so a wrong URL cannot fill the instance's disk.
+        """
+        import urllib.request
+
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".part")
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "polymarket-calibrated-bot/1.0"}
+        )
+        written = 0
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                if getattr(response, "status", 200) != 200:
+                    raise RuntimeError(f"model download returned HTTP {response.status}")
+                with open(temporary, "wb") as handle:
+                    while True:
+                        chunk = response.read(1024 * 256)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise RuntimeError(
+                                f"model artifact exceeds {max_bytes} bytes; refusing to write"
+                            )
+                        handle.write(chunk)
+            if written == 0:
+                raise RuntimeError("model download was empty")
+            os.replace(temporary, destination)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        logger.info("Downloaded model artifact from %s (%d bytes)", url, written)
         return destination
 
     def load(self, path: str | Path) -> bool:

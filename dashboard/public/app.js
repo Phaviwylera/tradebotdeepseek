@@ -451,13 +451,23 @@ function describeHealth(health) {
     mode === "DRY-RUN"
       ? " It is in DRY-RUN, so it records signals and submits no orders by design."
       : "";
+  const model = health.model && typeof health.model === "object" ? health.model : null;
+  const modelNote = !model
+    ? ""
+    : model.loaded
+      ? ` Model active (${model.backend || "unknown"} backend${model.trained_at ? `, trained ${String(model.trained_at).slice(0, 10)}` : ""}).`
+      : model.error
+        ? ` Model unavailable: ${model.error}.`
+        : " Model off, so only ARB + SNIPE are looking for edge.";
   const loopSentence = Number.isFinite(stale)
     ? `last cycle ${formatDuration(stale)} ago`
     : "last cycle time unknown";
   const cycleSentence = [
     Number.isFinite(scanned) ? `${scanned} markets scanned` : null,
     Number.isFinite(evaluated) ? `${evaluated} evaluated` : null,
-    Number.isFinite(signals) ? `${signals} signals in that cycle` : null,
+    Number.isFinite(signals)
+      ? `${signals} signal${signals === 1 ? "" : "s"} in that cycle`
+      : null,
   ]
     .filter(Boolean)
     .join(", ");
@@ -497,7 +507,7 @@ function describeHealth(health) {
   return {
     tone: "info",
     title: `Token required — but the bot is running (${mode})`,
-    text: `Live from /healthz: ${loopSentence}; ${cycleSentence}. Total ${totals}.${dryRunNote} ${tokenHint} The cards and tables below are sample data, not its results.`,
+    text: `Live from /healthz: ${loopSentence}; ${cycleSentence}. Total ${totals}.${dryRunNote}${modelNote} ${tokenHint} The cards and tables below are sample data, not its results.`,
   };
 }
 

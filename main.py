@@ -116,12 +116,18 @@ class TradingBot:
                 await self.run_cycle()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Trading cycle failed; sleeping %ds before retry",
                     self.settings.error_sleep_seconds,
                 )
-                await asyncio.to_thread(self.ledger.record_error, "trading cycle failed (see logs)")
+                # Publish the reason, not "see logs": /healthz is public, and it
+                # is the only place a user without the token can see why the
+                # bot stopped producing signals.
+                await asyncio.to_thread(
+                    self.ledger.record_error,
+                    f"trading cycle failed: {type(exc).__name__}: {exc}",
+                )
                 await self._wait_or_stop(self.settings.error_sleep_seconds)
                 continue
 
@@ -181,8 +187,10 @@ class TradingBot:
 
         evaluated = 0
         generated = 0
+        book_failures: list[BaseException] = []
         for market, result in zip(markets, fetched, strict=False):
             if isinstance(result, BaseException):
+                book_failures.append(result)
                 logger.warning("Skipping market %s: %s", market.condition_id[:12], result)
                 continue
             yes_book, no_book = result
@@ -215,6 +223,20 @@ class TradingBot:
             )
         except Exception:
             logger.exception("Could not publish runtime status")
+
+        if markets and evaluated == 0 and book_failures:
+            # Every book fetch failed: the market data source is unreachable
+            # (blocked region, API change, DNS). Nothing will ever trade in this
+            # state, so say so where a token-less /healthz reader can see it.
+            first = book_failures[0]
+            try:
+                await asyncio.to_thread(
+                    self.ledger.record_error,
+                    f"all {len(book_failures)}/{len(markets)} order-book fetches failed: "
+                    f"{type(first).__name__}: {first}",
+                )
+            except Exception:
+                logger.exception("Could not publish book-fetch failure")
 
     async def _evaluate_market(
         self, market: Market, yes_book: OrderBook, no_book: OrderBook

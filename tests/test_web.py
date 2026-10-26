@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -103,7 +104,22 @@ class StatusServerTests(unittest.TestCase):
     def test_health_is_open_and_cheap(self) -> None:
         status, _, body = self.request("/healthz", token=None)
         self.assertEqual(status, 200)
-        self.assertTrue(json.loads(body)["ok"])
+        payload = json.loads(body)
+        self.assertTrue(payload["ok"])
+        self.assertIn(payload["loop"], {"ok", "stalled"})
+        self.assertEqual(payload["mode"], "dry_run")
+
+    def test_health_answers_without_the_token_but_leaks_no_market_data(self) -> None:
+        status, _, body = self.request("/healthz", token=None)
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        # Aggregates are public; the actual signals/orders are not.
+        self.assertEqual(payload["counts"]["signals_total"], 1)
+        self.assertEqual(payload["counts"]["orders_total"], 1)
+        self.assertNotIn("recent_signals", payload)
+        self.assertNotIn("recent_orders", payload)
+        self.assertNotIn(b"token-yes", body)
+        self.assertNotIn(b"0xmarket", body)
 
     def test_status_requires_token(self) -> None:
         status, _, body = self.request("/api/status", token=None)
@@ -280,3 +296,76 @@ class ConcurrencyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HealthProbeTests(unittest.TestCase):
+    """`/healthz` is the only token-free window into the trading loop."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ledger_path = Path(self.tmp.name) / "ledger.db"
+
+    def _ledger(self) -> Ledger:
+        ledger = Ledger(self.ledger_path)
+        self.addCleanup(ledger.close)
+        return ledger
+
+    def _cycle(self, ledger: Ledger, *, scanned: int = 12, evaluated: int = 11) -> None:
+        ledger.record_cycle(
+            markets_scanned=scanned,
+            markets_evaluated=evaluated,
+            signals_emitted=1,
+            risk={"equity": 200.0, "cash": 190.5, "exposure": 9.5, "realized_pnl": 0.0,
+                  "drawdown_pct": 0.0, "killed": False, "kill_reason": None},
+        )
+
+    def test_healthy_loop_reports_vitals(self) -> None:
+        ledger = self._ledger()
+        ledger.record_start(mode="dry_run")
+        self._cycle(ledger)
+        payload = web.build_health(self.ledger_path)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["loop"], "ok")
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["markets_scanned"], 12)
+        self.assertEqual(payload["markets_evaluated"], 11)
+        self.assertEqual(payload["signals_last_cycle"], 1)
+        self.assertIsInstance(payload["seconds_since_cycle"], float)
+        self.assertIsNone(payload["last_error"])
+
+    def test_publishes_the_error_text_instead_of_see_logs(self) -> None:
+        ledger = self._ledger()
+        ledger.record_start(mode="dry_run")
+        ledger.record_error("trading cycle failed: HTTPStatusError: 403 Forbidden")
+        payload = web.build_health(self.ledger_path)
+        self.assertEqual(payload["loop"], "error")
+        self.assertIn("403 Forbidden", payload["last_error"])
+        self.assertIn("last_error", payload["reason"])
+
+    def test_flags_a_stalled_loop(self) -> None:
+        ledger = self._ledger()
+        ledger.record_start(mode="dry_run")
+        self._cycle(ledger)
+        ledger.close()
+        with sqlite3.connect(str(self.ledger_path)) as connection:
+            connection.execute(
+                "UPDATE runtime SET updated_at = '2020-01-01T00:00:00+00:00' WHERE id = 1"
+            )
+        payload = web.build_health(self.ledger_path)
+        self.assertEqual(payload["loop"], "stalled")
+        self.assertGreater(payload["seconds_since_cycle"], web.HEALTH_STALL_SECONDS)
+        self.assertIn("pipeline is not cycling", payload["reason"])
+
+    def test_missing_ledger_is_still_ok(self) -> None:
+        payload = web.build_health(Path(self.tmp.name) / "nope.db")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["loop"], "unknown")
+        self.assertIn("ledger not created yet", payload["reason"])
+
+    def test_unreadable_ledger_never_raises(self) -> None:
+        broken = Path(self.tmp.name) / "broken.db"
+        broken.write_bytes(b"not a sqlite database")
+        payload = web.build_health(broken)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["loop"], "unknown")

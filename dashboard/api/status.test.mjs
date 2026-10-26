@@ -120,6 +120,47 @@ test("turns an upstream 401 into a token hint", async () => {
   global.fetch = REAL_FETCH;
 });
 
+test("attaches the public /healthz summary to a 401", async () => {
+  const health = {
+    ok: true,
+    service: "polymarket-status",
+    loop: "ok",
+    mode: "dry_run",
+    seconds_since_cycle: 12.5,
+    markets_scanned: 20,
+    markets_evaluated: 18,
+    signals_last_cycle: 2,
+    counts: { signals_total: 41, signals_24h: 12, orders_total: 0 },
+  };
+  respondWith([
+    { status: 401, body: JSON.stringify({ error: "unauthorized" }) },
+    { status: 200, body: JSON.stringify(health) },
+  ]);
+  const res = fakeRes();
+  await handler({ method: "GET", query: {} }, res);
+  assert.equal(res.statusCode, 401);
+  const payload = JSON.parse(res.body);
+  assert.equal(payload.health.loop, "ok");
+  assert.equal(payload.health.markets_scanned, 20);
+  // The health read must not carry the token: /healthz is public.
+  const healthCall = calls[calls.length - 1];
+  assert.match(healthCall.url, /\/healthz$/);
+  assert.equal(healthCall.headers.Authorization, undefined);
+  global.fetch = REAL_FETCH;
+});
+
+test("still returns the 401 when /healthz is unreachable", async () => {
+  respondWith([
+    { status: 401, body: JSON.stringify({ error: "unauthorized" }) },
+    new Error("getaddrinfo ENOTFOUND"),
+  ]);
+  const res = fakeRes();
+  await handler({ method: "GET", query: {} }, res);
+  assert.equal(res.statusCode, 401);
+  assert.equal(JSON.parse(res.body).health, null);
+  global.fetch = REAL_FETCH;
+});
+
 test("passes a structured bot error through instead of masking it", async () => {
   respondWith([
     {

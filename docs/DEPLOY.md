@@ -227,6 +227,10 @@ opening positions until you restart it — that is deliberate.
 | `ledger not created yet` | bot has not finished its first cycle | wait one interval; check `docker compose logs` |
 | `stalled` banner in console | `stale_seconds` > 180 | the loop is stuck, not just the container: read logs |
 | Container healthy but no signals | normal in DRY-RUN | arbitrage under 0.985 is rare; snipes need the final 2.4h |
+| **No trades at all, ever** | `LIVE=false` | by design: DRY-RUN records signals in SQLite and never submits an order. Flip `LIVE=true` and add `POLYGON_PRIVATE_KEY` only when you mean it |
+| No signals *and* the page shows sample data | Vercel has no token | the banner now quotes the bot's public `/healthz`; open `<bot-url>/healthz` for the same numbers without any secret |
+| `/healthz` says `loop: error` | the last cycle raised | `last_error` carries the real exception now (e.g. market data unreachable), not "see logs" |
+| `/healthz` says `loop: stalled` | no heartbeat for >300 s | the process is up but the pipeline is wedged; read the logs |
 | `Risk blocked` rows | exposure/daily-loss caps | expected; inspect `reason` in the signals table |
 | xgboost missing at model load | artifact trained with ML extras | `pip install -r requirements-ml.txt` |
 

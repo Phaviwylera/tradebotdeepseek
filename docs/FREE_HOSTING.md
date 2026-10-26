@@ -121,6 +121,7 @@ used to look like a broken deploy. Now:
 | `dashboard/api/status.js` | **retries through the boot** (up to ~50 s) before giving up |
 | The console | shows an info banner **"Bot is waking up"** and retries every 10 s |
 | `keepalive.yml` | makes this rare by pinging every 5 minutes |
+| `/healthz` | needs no token and now reports `loop`, last cycle age and the last error, so you can tell "asleep" from "running but doing nothing" |
 
 Once awake the console switches to live data on its own. Nothing needs a refresh.
 

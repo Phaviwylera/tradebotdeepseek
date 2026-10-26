@@ -65,6 +65,26 @@ The page resolves its endpoint in this order:
 The bot's optional `DASHBOARD_TOKEN` is sent as a bearer token. It is never
 embedded in the bundle, and the Vercel proxy keeps it server-side.
 
+### What happens without a token
+
+A `401` is not a dead end. The proxy also reads the bot's **public** `/healthz`
+(no token) and returns that summary next to the error:
+
+```json
+{ "configured": true, "error": "unauthorized", "hint": "...",
+  "health": { "loop": "ok", "mode": "dry_run", "seconds_since_cycle": 12.4,
+              "markets_scanned": 20, "markets_evaluated": 18,
+              "signals_last_cycle": 2,
+              "counts": { "signals_total": 41, "signals_24h": 12, "orders_total": 0 },
+              "last_error": null } }
+```
+
+So the banner can say "the bot is running, last cycle 12s ago, 2 signals, 0 orders
+because it is DRY-RUN" instead of only showing sample data, and a real failure
+(`loop: "error"` with the exception text, or `loop: "stalled"`) is visible without
+anyone sharing a secret. Market ids, prices, positions and P&L stay behind the
+token.
+
 ## Security notes
 
 - The page cannot place, cancel, or modify anything: the API is `GET`/`HEAD` only

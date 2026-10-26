@@ -253,7 +253,7 @@ a standalone sidecar when you want the API in a process that cannot trade.
 
 | Path | Contents | Auth |
 |---|---|---|
-| `/healthz` | liveness probe | never |
+| `/healthz` | liveness probe **plus loop vitals**: `loop` (`ok`/`stalled`/`error`), last cycle age, markets scanned/evaluated, signals, last error | never |
 | `/` | static console shell | never (no data) |
 | `/api/status` | runtime mode, risk state, counts, recent rows | `DASHBOARD_TOKEN` |
 | `/api/signals?limit=50` | recent signals | `DASHBOARD_TOKEN` |

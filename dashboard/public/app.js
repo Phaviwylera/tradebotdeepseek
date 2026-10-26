@@ -91,10 +91,13 @@ function endpoint(path = "/api/status") {
 const CLIENT_TIMEOUT_MS = 70_000;
 const WAKING_RETRY_SECONDS = 10;
 
-function failure(kind, detail) {
+function failure(kind, detail, health) {
   const error = new Error(detail || kind);
   error.kind = kind;
   error.detail = detail || "";
+  // The Vercel proxy attaches the bot's public /healthz summary to a 401, so a
+  // page without a token can still show what the loop is really doing.
+  error.health = health && typeof health === "object" ? health : null;
   return error;
 }
 
@@ -124,7 +127,9 @@ async function fetchStatus() {
       // The bot is asleep and the host is booting it. Not an error: wait.
       if (payload && payload.waking) throw failure("waking");
       // The bot is up but wants its bearer token.
-      if (response.status === 401) throw failure("token-required", payload && payload.hint);
+      if (response.status === 401) {
+        throw failure("token-required", payload && payload.hint, payload && payload.health);
+      }
       // A static-only host has no proxy function; treat that as "not wired up".
       if (response.status === 404 || response.status === 405) {
         throw failure("unconfigured", "no status API at this address");
@@ -149,7 +154,11 @@ async function fetchStatus() {
       enterWaking();
     } else {
       state.source = "demo";
-      applyPayload(buildDemoPayload(), "demo", { kind, detail: error.detail || error.message });
+      applyPayload(buildDemoPayload(), "demo", {
+        kind,
+        detail: error.detail || error.message,
+        health: error.health || null,
+      });
     }
   } finally {
     clearTimeout(timeout);
@@ -346,6 +355,20 @@ function renderNotice(payload, source, failure) {
   const detail = typeof failure === "string" ? failure : (failure && failure.detail) || "";
   const reason = typeof failure === "string" ? failure : detail;
 
+  // A 401 that carries the bot's public /healthz summary: say what the loop is
+  // really doing before asking for the token.
+  if (kind === "token-required" && failure && failure.health) {
+    const summary = describeHealth(failure.health);
+    showNotice({
+      tone: summary.tone,
+      title: summary.title,
+      text: summary.text,
+      actionLabel: "Paste token",
+      action: openDialog,
+    });
+    return;
+  }
+
   if (kind === "waking") {
     showNotice({
       tone: "info",
@@ -411,6 +434,71 @@ function renderNotice(payload, source, failure) {
   }
 
   hideNotice();
+}
+
+// turn the public /healthz payload into one honest sentence (or a warning)
+function describeHealth(health) {
+  const loop = String(health.loop || "unknown");
+  const mode = String(health.mode || "").toLowerCase() === "live" ? "LIVE" : "DRY-RUN";
+  const counts = health.counts || {};
+  const scanned = Number(health.markets_scanned);
+  const evaluated = Number(health.markets_evaluated);
+  const signals = Number(health.signals_last_cycle);
+  const stale = Number(health.seconds_since_cycle);
+  const tokenHint =
+    "Paste the DASHBOARD_TOKEN (Render → Environment) to unlock the signal and order tables.";
+  const dryRunNote =
+    mode === "DRY-RUN"
+      ? " It is in DRY-RUN, so it records signals and submits no orders by design."
+      : "";
+  const loopSentence = Number.isFinite(stale)
+    ? `last cycle ${formatDuration(stale)} ago`
+    : "last cycle time unknown";
+  const cycleSentence = [
+    Number.isFinite(scanned) ? `${scanned} markets scanned` : null,
+    Number.isFinite(evaluated) ? `${evaluated} evaluated` : null,
+    Number.isFinite(signals) ? `${signals} signals in that cycle` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const totals = [
+    `${valueOrDash(counts.signals_total)} signals`,
+    `${valueOrDash(counts.orders_total)} orders ever`,
+  ].join(" · ");
+
+  if (loop === "error") {
+    return {
+      tone: "warn",
+      title: "The bot is up but its last cycle failed",
+      text: `Last error: ${
+        health.last_error || "the last trading cycle raised an error"
+      } — read from the public /healthz, so no token was needed.${dryRunNote} ${tokenHint}`,
+    };
+  }
+
+  if (loop === "stalled") {
+    return {
+      tone: "danger",
+      title: "The loop is not cycling",
+      text: `No cycle heartbeat for more than five minutes (${
+        Number.isFinite(stale) ? formatDuration(stale) : "unknown"
+      }). The container is up but the pipeline is wedged, so no signals can appear. Check the service logs. ${tokenHint}`,
+    };
+  }
+
+  if (loop === "unknown") {
+    return {
+      tone: "info",
+      title: "Token required",
+      text: `The bot process answers, but it has not published a trading cycle yet. ${tokenHint} The numbers below are sample data.`,
+    };
+  }
+
+  return {
+    tone: "info",
+    title: `Token required — but the bot is running (${mode})`,
+    text: `Live from /healthz: ${loopSentence}; ${cycleSentence}. Total ${totals}.${dryRunNote} ${tokenHint} The cards and tables below are sample data, not its results.`,
+  };
 }
 
 function showNotice({ tone, title, text, actionLabel, action }) {

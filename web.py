@@ -49,6 +49,9 @@ logger = logging.getLogger("web")
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 SERVER_NAME = "polymarket-status/2.0"
+# A cycle runs every SCAN_INTERVAL_SECONDS (60 by default). Five minutes of
+# silence means the loop is wedged, not merely between cycles.
+HEALTH_STALL_SECONDS = 300
 
 REPO_ROOT = Path(__file__).resolve().parent
 STATIC_CONTENT_TYPES = {
@@ -103,12 +106,12 @@ def uptime_seconds(started_at: str | None) -> float | None:
     return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
 
 
-def connect(ledger_path: Path) -> sqlite3.Connection:
+def connect(ledger_path: Path, *, busy_ms: int = 5000) -> sqlite3.Connection:
     """Open the ledger for reading only (no writes, no schema changes)."""
     connection = sqlite3.connect(str(ledger_path), timeout=10.0)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
-    connection.execute("PRAGMA busy_timeout=5000")
+    connection.execute(f"PRAGMA busy_timeout={int(busy_ms)}")
     return connection
 
 
@@ -145,7 +148,9 @@ def build_status(ledger_path: Path, limit: int = DEFAULT_LIMIT) -> dict[str, Any
     if not ledger_path.exists():
         return empty_status(f"ledger not created yet: {ledger_path}")
 
-    connection = connect(ledger_path)
+    # A health probe must not wait on a writer: give up quickly and let
+    # build_health() degrade to loop=unknown instead of hanging Render.
+    connection = connect(ledger_path, busy_ms=800)
     try:
         runtime_row = connection.execute("SELECT * FROM runtime WHERE id = 1").fetchone()
         signals = connection.execute(
@@ -208,6 +213,119 @@ def build_status(ledger_path: Path, limit: int = DEFAULT_LIMIT) -> dict[str, Any
         },
         "recent_signals": recent_signals,
         "recent_orders": [_row_to_dict(row) for row in orders],
+    }
+
+
+def build_health(ledger_path: Path) -> dict[str, Any]:
+    """Public, secret-free answer to "is the trading loop actually running?".
+
+    ``/healthz`` is the only route that never asks for a token: Render polls it,
+    the keep-alive workflow pings it, and a user who cannot share their
+    ``DASHBOARD_TOKEN`` can still open it. So it carries the loop's vitals —
+    cycle heartbeat, how many markets were scanned/evaluated, how many signals
+    the last cycle produced, and the last error — while every market, price,
+    position and P&L number stays behind the token on ``/api/status``.
+
+    It must never fail: a health check that 500s gets the service restarted.
+    Any ledger problem degrades to ``loop: unknown`` with a 200.
+    """
+    payload: dict[str, Any] = {
+        "ok": True,
+        "service": "polymarket-status",
+        "server_time": utc_iso(),
+        "loop": "unknown",
+        "reason": None,
+        "mode": None,
+        "uptime_seconds": None,
+        "last_cycle_at": None,
+        "seconds_since_cycle": None,
+        "markets_scanned": None,
+        "markets_evaluated": None,
+        "signals_last_cycle": None,
+        "counts": {"signals_total": None, "signals_24h": None, "orders_total": None},
+        "killed": None,
+        "last_error": None,
+    }
+    try:
+        payload.update(health_detail(ledger_path))
+    except (sqlite3.Error, OSError) as exc:  # pragma: no cover - defensive
+        logger.warning("Health detail unavailable: %s", exc)
+        payload["reason"] = "ledger unreadable"
+    payload["ok"] = True
+    payload["server_time"] = utc_iso()
+    return payload
+
+
+def health_detail(ledger_path: Path) -> dict[str, Any]:
+    """Loop vitals read from one consistent snapshot of ``runtime``."""
+    ledger_path = Path(ledger_path)
+    if not ledger_path.exists():
+        return {"loop": "unknown", "reason": f"ledger not created yet: {ledger_path}"}
+
+    connection = connect(ledger_path)
+    try:
+        runtime_row = connection.execute("SELECT * FROM runtime WHERE id = 1").fetchone()
+        signals_total = connection.execute("SELECT COUNT(*) FROM signals").fetchone()[0]
+        signals_24h = connection.execute(
+            """
+            SELECT COUNT(*) FROM signals
+            WHERE ts >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-1 day')
+            """
+        ).fetchone()[0]
+        orders_total = connection.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+    finally:
+        connection.close()
+
+    if runtime_row is None:
+        return {
+            "loop": "unknown",
+            "reason": "the bot has not published its first cycle yet",
+            "counts": {
+                "signals_total": int(signals_total),
+                "signals_24h": int(signals_24h),
+                "orders_total": int(orders_total),
+            },
+        }
+
+    runtime = _row_to_dict(runtime_row)
+    stale = _stale_seconds(runtime.get("updated_at"))
+    last_error = runtime.get("last_error")
+    if last_error:
+        loop = "error"
+    elif stale is None or stale > HEALTH_STALL_SECONDS:
+        loop = "stalled"
+    else:
+        loop = "ok"
+
+    reason = None
+    if loop == "error":
+        reason = "the last trading cycle raised; see last_error"
+    elif loop == "stalled":
+        if stale is None:
+            reason = "the runtime row has no readable heartbeat"
+        else:
+            reason = (
+                f"no cycle heartbeat for {int(stale)}s (> {HEALTH_STALL_SECONDS}s); "
+                "the process is up but the pipeline is not cycling"
+            )
+
+    return {
+        "loop": loop,
+        "reason": reason,
+        "mode": runtime.get("mode"),
+        "uptime_seconds": uptime_seconds(runtime.get("started_at")),
+        "last_cycle_at": runtime.get("updated_at"),
+        "seconds_since_cycle": stale,
+        "markets_scanned": runtime.get("markets_scanned"),
+        "markets_evaluated": runtime.get("markets_evaluated"),
+        "signals_last_cycle": runtime.get("signals_emitted"),
+        "counts": {
+            "signals_total": int(signals_total),
+            "signals_24h": int(signals_24h),
+            "orders_total": int(orders_total),
+        },
+        "killed": bool(runtime.get("killed")),
+        "last_error": last_error,
     }
 
 
@@ -337,10 +455,10 @@ class StatusHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if path in {"/healthz", "/health", "/api/health"}:
-            self._send(
-                200,
-                {"ok": True, "service": "polymarket-status", "server_time": utc_iso()},
-            )
+            # Public and always 200: Render restarts a service whose health check
+            # fails, and the loop's vitals are what tell a token-less user
+            # whether anything is actually happening.
+            self._send(200, build_health(self.ledger_path))
             return
 
         if path.startswith("/api/"):

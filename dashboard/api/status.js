@@ -23,6 +23,9 @@ const ATTEMPT_TIMEOUT_MS = Number(process.env.BOT_ATTEMPT_TIMEOUT_MS || 18_000);
 const WAKE_BUDGET_MS = Number(process.env.BOT_WAKE_BUDGET_MS || 50_000);
 const RETRY_DELAY_MS = Number(process.env.BOT_RETRY_DELAY_MS || 6_000);
 const MAX_ATTEMPTS = 4;
+// /healthz needs no token, so it still answers when /api/status returns 401.
+// One short, best-effort attempt: never let it delay the real response.
+const HEALTH_TIMEOUT_MS = Number(process.env.BOT_HEALTH_TIMEOUT_MS || 8_000);
 
 // Render (and similar platforms) serve these while an instance boots.
 const COLD_START_MARKERS =
@@ -66,6 +69,23 @@ async function fetchOnce(target, headers, timeoutMs) {
     return { status: response.status, ok: response.ok, text };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// The bot's /healthz is public and always 200; it is the only way the console
+// can show real loop vitals while the token is missing.
+async function fetchHealth(baseUrl) {
+  try {
+    const upstream = await fetchOnce(
+      `${baseUrl}/healthz`,
+      { Accept: "application/json" },
+      HEALTH_TIMEOUT_MS,
+    );
+    if (!upstream.ok) return null;
+    const payload = parseJson(upstream.text);
+    return payload && typeof payload.loop === "string" ? payload : null;
+  } catch {
+    return null;
   }
 }
 
@@ -116,12 +136,17 @@ async function handler(req, res) {
       }
 
       if (upstream.status === 401 || upstream.status === 403) {
+        // The bot is up and asking for its token. Attach the public health
+        // summary so the console can still prove the loop is running instead
+        // of showing nothing but sample data.
+        const health = await fetchHealth(baseUrl);
         return json(res, 401, {
           configured: true,
           error: "unauthorized",
           hint: token
             ? "BOT_API_TOKEN does not match the bot's DASHBOARD_TOKEN."
             : "Set BOT_API_TOKEN in the Vercel project to the bot's DASHBOARD_TOKEN, or leave the bot's DASHBOARD_TOKEN empty.",
+          health,
         });
       }
 
@@ -170,4 +195,5 @@ async function handler(req, res) {
 module.exports = handler;
 // Exported for the unit test in status.test.mjs.
 module.exports.looksLikeColdStart = looksLikeColdStart;
+module.exports.fetchHealth = fetchHealth;
 module.exports.parseJson = parseJson;

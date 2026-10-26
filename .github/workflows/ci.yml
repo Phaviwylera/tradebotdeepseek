@@ -76,6 +76,8 @@ jobs:
         run: |
           node --check dashboard/api/status.js
           node --check dashboard/api/health.js
+      - name: Test the status proxy (cold-start retries, auth hints)
+        run: node --test dashboard/api/status.test.mjs
       - name: Validate vercel.json
         run: node -e "JSON.parse(require('fs').readFileSync('dashboard/vercel.json','utf8'));console.log('vercel.json ok')"
 

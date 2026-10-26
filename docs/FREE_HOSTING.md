@@ -35,15 +35,21 @@ stops an idle service, so the repo is set up accordingly:
    [render.com/deploy?repo=Phaviwylera/tradebotdeepseek](https://render.com/deploy?repo=https://github.com/Phaviwylera/tradebotdeepseek)
    → **Apply**. Wait for the first build (`pip install -r requirements.txt`).
 2. **Copy the service URL**, e.g. `https://polymarket-calibrated-bot.onrender.com`.
-3. **Turn on the keep-alive.** In GitHub → this repo →
-   **Settings → Secrets and variables → Actions → Variables → New variable**:
+3. **Keep-alive is already wired.** The workflow reads the repository variable
+   `BOT_URL` if it exists, and otherwise falls back to the first URL in
+   [`deploy/bot-url.txt`](../deploy/bot-url.txt) — which ships filled in with
+   `https://polymarket-calibrated-bot.onrender.com`. So there is nothing to
+   configure unless you deploy under a different name:
 
-   | Name | Value |
+   | Where to change it | When |
    |---|---|
-   | `BOT_URL` | `https://polymarket-calibrated-bot.onrender.com` |
+   | edit `deploy/bot-url.txt` | simplest; the URL is public anyway |
+   | repo variable `BOT_URL` (Settings → Secrets and variables → Actions → Variables) | you would rather not commit the URL; the variable wins |
 
-   Then run the workflow once by hand: **Actions → Keep-alive → Run workflow**.
-   It should print `OK (attempt 1): {"ok":true,...}`.
+   Enable it once: **Actions → Keep-alive → Run workflow**. It should print
+   `OK (attempt 1): {"ok":true,...}`. After that it runs every 5 minutes on its
+   own. (GitHub disables schedules after ~60 days without repo activity; any push
+   turns it back on.)
 4. **Open the console** at `https://<service>.onrender.com/` — the bot serves it.
    Paste the `DASHBOARD_TOKEN` from Render → **Environment** into **Connect**.
    Or point the Vercel console at it: set `BOT_API_URL` in Vercel and it appears
@@ -100,6 +106,21 @@ generates for you. Both are correct behaviour — pick one:
   and redeploy. `/api/status` then answers without a token. Reasonable while
   `LIVE=false` (no funds, no keys) — but re-add a token before you ever flip
   `LIVE=true`.
+
+### Cold starts: what a 40-second wake looks like now
+
+Without traffic, the free instance is stopped. The next request boots it, and
+Render serves an HTML "Application loading" page in the meantime (~40–60 s). That
+used to look like a broken deploy. Now:
+
+| Layer | Behaviour |
+|---|---|
+| Render | boots the instance on the first request |
+| `dashboard/api/status.js` | **retries through the boot** (up to ~50 s) before giving up |
+| The console | shows an info banner **"Bot is waking up"** and retries every 10 s |
+| `keepalive.yml` | makes this rare by pinging every 5 minutes |
+
+Once awake the console switches to live data on its own. Nothing needs a refresh.
 
 ### What you give up on the free plan
 

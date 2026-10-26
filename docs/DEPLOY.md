@@ -217,7 +217,9 @@ opening positions until you restart it — that is deliberate.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `No open ports detected` on Render | deployed as a worker | use the web service in `render.yaml` |
-| Render free service keeps sleeping | no pinger configured | set the `BOT_URL` repo variable; run the Keep-alive workflow |
+| Render free service keeps sleeping | no pinger configured | the keep-alive reads `deploy/bot-url.txt`; run **Actions → Keep-alive** once |
+| Console says "Bot is waking up" | free instance was stopped | wait ~40 s; the page retries itself. A pinger makes this rare |
+| Vercel console shows demo, Render console works | the Vercel proxy has no token | add `BOT_API_TOKEN` = the bot's `DASHBOARD_TOKEN` in Vercel (browser `Connect` only affects your browser) |
 | Audit history vanished after a deploy | free plan has no disk | expected on free; use `deploy/render-starter.yaml` |
 | Console shows *demo data* | API not reachable or token rejected | open **Connect**, check URL/token; `curl <url>/healthz` |
 | `/api/status` returns 401 | `DASHBOARD_TOKEN` set | send `Authorization: Bearer <token>` or `?token=` |

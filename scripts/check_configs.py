@@ -116,6 +116,32 @@ def check_compose() -> None:
         )
 
 
+def check_keepalive_target() -> None:
+    """The keep-alive workflow needs a URL from the variable or the committed file."""
+    path = ROOT / "deploy" / "bot-url.txt"
+    if not path.exists():
+        fail("deploy/bot-url.txt: missing (keep-alive has no fallback URL)")
+        return
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not lines:
+        fail("deploy/bot-url.txt: no URL line")
+        return
+    url = lines[0]
+    if not url.startswith("https://"):
+        fail(f"deploy/bot-url.txt: expected an https:// URL, got {url!r}")
+    if url.endswith("/"):
+        fail("deploy/bot-url.txt: drop the trailing slash")
+    if " " in url:
+        fail(f"deploy/bot-url.txt: unexpected whitespace in {url!r}")
+    workflow = (ROOT / ".github" / "workflows" / "keepalive.yml").read_text(encoding="utf-8")
+    if "deploy/bot-url.txt" not in workflow:
+        fail("keepalive.yml: does not fall back to deploy/bot-url.txt")
+
+
 def check_vercel() -> None:
     path = ROOT / "dashboard" / "vercel.json"
     try:
@@ -134,6 +160,7 @@ def main() -> int:
     check_render("render.yaml", expect_plan="free", expect_disk=False)
     check_render("deploy/render-starter.yaml", expect_plan="starter", expect_disk=True)
     check_workflows()
+    check_keepalive_target()
     check_compose()
     check_vercel()
 

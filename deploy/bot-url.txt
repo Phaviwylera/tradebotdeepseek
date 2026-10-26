@@ -1,0 +1,4 @@
+# Public base URL of the deployed bot (no trailing slash).
+# Used by .github/workflows/keepalive.yml when the repo variable BOT_URL is not set.
+# Update this line if you rename or move the service.
+https://polymarket-calibrated-bot.onrender.com

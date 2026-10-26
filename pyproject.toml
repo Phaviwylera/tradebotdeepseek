@@ -1,0 +1,38 @@
+[project]
+name = "polymarket-calibrated-bot"
+version = "1.1.0"
+description = "Calibrated, risk-bounded Polymarket execution service with a read-only operations console"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "venv", "dashboard", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "W",   # pycodestyle warnings
+  "I",   # import sorting
+  "B",   # flake8-bugbear
+  "C4",  # comprehensions
+  "UP",  # pyupgrade
+  "SIM", # simplify
+]
+ignore = [
+  "E501", # line length is enforced by the formatter, not the linter
+  "B008", # function calls in argument defaults are idiomatic here
+  "UP017", # the codebase consistently uses timezone.utc
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

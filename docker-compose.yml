@@ -1,8 +1,22 @@
-# Production compose file for an AWS EC2 box.
+# Production compose file for an AWS EC2 box (or any Docker host).
 #
-# The bot and the read-only status API share one named volume, so SQLite and
-# model artifacts survive container re-creation. Only the status API is bound
-# to localhost; nothing is exposed publicly by this file.
+# ONE container:
+#   bot — the 60-second async pipeline. It also serves the read-only status API
+#         and the static dashboard on port 8099 *inside* the container.
+#
+# The port is published to the host loopback only (127.0.0.1:8099), so nothing
+# is publicly reachable unless you put nginx in front of it. Reach the dashboard
+# through an SSH tunnel or nginx:
+#
+#   ssh -N -L 8099:127.0.0.1:8099 ec2-user@<host>
+#   open http://127.0.0.1:8099
+#
+# API_HOST must be 0.0.0.0 *inside* the container: Docker forwards published
+# ports to the container's network interface, not to its loopback. Publishing to
+# 127.0.0.1 on the host keeps the process off the public internet.
+#
+# Named volume `polymarket-data` holds the SQLite ledger and model artifacts, so
+# `docker compose down` is safe and `docker compose down -v` deletes state.
 
 services:
   bot:
@@ -15,29 +29,50 @@ services:
     environment:
       LEDGER_PATH: /data/ledger.db
       MODEL_PATH: /data/model.joblib
+      API_HOST: 0.0.0.0
+      API_PORT: "8099"
+      WEB_ENABLED: "true"
+      SERVE_DASHBOARD: "true"
     volumes:
       - polymarket-data:/data
+    ports:
+      - "127.0.0.1:8099:8099"
     stop_grace_period: 45s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8099/healthz',timeout=4)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     logging:
       driver: json-file
       options:
         max-size: "20m"
         max-file: "5"
 
+  # Optional: a second, fully read-only process for the API only. It shares the
+  # volume but never receives the trading environment (no private key, no LIVE
+  # flag). Enable with `docker compose --profile sidecar up -d` when you want the
+  # dashboard served by a process that cannot trade.
   status-api:
+    profiles: ["sidecar"]
     image: polymarket-bot:latest
     container_name: polymarket-status-api
     restart: unless-stopped
     command: ["python", "dashboard_api.py"]
     environment:
       LEDGER_PATH: /data/ledger.db
-      API_HOST: 127.0.0.1
+      API_HOST: 0.0.0.0
       API_PORT: "8099"
       DASHBOARD_TOKEN: ${DASHBOARD_TOKEN:-}
     volumes:
       - polymarket-data:/data
     ports:
-      - "127.0.0.1:8099:8099"
+      - "127.0.0.1:8100:8099"
     depends_on:
       - bot
     read_only: true

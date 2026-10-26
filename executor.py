@@ -56,9 +56,7 @@ class OrderExecutor:
 
         private_key = os.getenv("POLYGON_PRIVATE_KEY", "").strip()
         if not private_key:
-            raise RuntimeError(
-                "LIVE=true requires POLYGON_PRIVATE_KEY in the environment"
-            )
+            raise RuntimeError("LIVE=true requires POLYGON_PRIVATE_KEY in the environment")
 
         from py_clob_client.client import ClobClient
 

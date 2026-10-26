@@ -1,0 +1,12 @@
+# Extra wheels required to TRAIN the calibrated stacking model with
+# `python train_model.py`, and to LOAD an artifact that was trained with them.
+#
+#   pip install -r requirements-ml.txt
+#
+# They are optional at runtime because the bot degrades to ARBITRAGE + SNIPE
+# when no model artifact is present. Keeping them out of requirements.txt cuts
+# the image from ~1.5 GB (xgboost alone drags nvidia-nccl-cu12) to a few hundred
+# MB, which is what makes a small Render/EC2 instance viable.
+-r requirements.txt
+xgboost==2.1.3
+lightgbm==4.5.0

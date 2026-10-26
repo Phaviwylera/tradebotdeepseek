@@ -55,16 +55,14 @@ class BookStream:
 
     def start(self) -> None:
         if self._task is None or self._task.done():
-            self._task = asyncio.create_task(
-                self._run(), name="polymarket-book-stream"
-            )
+            self._task = asyncio.create_task(self._run(), name="polymarket-book-stream")
 
     async def stop(self) -> None:
         self._stop.set()
         if self._task is not None:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._task.cancel()
                 try:
                     await self._task
@@ -102,7 +100,7 @@ class BookStream:
                             await self._sync_subscriptions(websocket)
                         try:
                             raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             continue
                         await self._handle_message(raw)
 
@@ -148,9 +146,7 @@ class BookStream:
         removed = sorted(self._sent_assets - self._assets)
         try:
             if added:
-                await websocket.send(
-                    json.dumps({"assets_ids": added, "operation": "subscribe"})
-                )
+                await websocket.send(json.dumps({"assets_ids": added, "operation": "subscribe"}))
             if removed:
                 await websocket.send(
                     json.dumps({"assets_ids": removed, "operation": "unsubscribe"})
@@ -193,14 +189,12 @@ class BookStream:
                 logger.exception("Order-book update callback failed for %s", asset_id)
 
 
-def _normalize(
-    levels: Iterable[Any], *, reverse: bool
-) -> list[tuple[float, float]]:
+def _normalize(levels: Iterable[Any], *, reverse: bool) -> list[tuple[float, float]]:
     aggregated: dict[float, float] = {}
     for level in levels:
         if isinstance(level, dict):
             price_raw, size_raw = level.get("price"), level.get("size")
-        elif isinstance(level, (list, tuple)) and len(level) >= 2:
+        elif isinstance(level, list | tuple) and len(level) >= 2:
             price_raw, size_raw = level[0], level[1]
         else:
             price_raw = getattr(level, "price", None)

@@ -51,8 +51,7 @@ class TimeSeriesStackingClassifier(ClassifierMixin, BaseEstimator):
     def __sklearn_clone__(self) -> TimeSeriesStackingClassifier:
         return TimeSeriesStackingClassifier(
             base_estimators=[
-                (name, clone(estimator))
-                for name, estimator in (self.base_estimators or [])
+                (name, clone(estimator)) for name, estimator in (self.base_estimators or [])
             ],
             final_estimator=clone(self.final_estimator),
             n_splits=self.n_splits,
@@ -75,9 +74,7 @@ class TimeSeriesStackingClassifier(ClassifierMixin, BaseEstimator):
         self.classes_ = np.unique(labels)
         self.n_features_in_ = features.shape[1]
         splitter = TimeSeriesSplit(n_splits=self.n_splits)
-        oof_predictions = np.full(
-            (len(features), len(self.base_estimators)), np.nan, dtype=float
-        )
+        oof_predictions = np.full((len(features), len(self.base_estimators)), np.nan, dtype=float)
 
         for train_index, test_index in splitter.split(features):
             train_labels = labels[train_index]
@@ -106,14 +103,11 @@ class TimeSeriesStackingClassifier(ClassifierMixin, BaseEstimator):
         if len(np.unique(meta_labels)) < 2:
             raise ValueError("Meta-model training rows contain only one class")
 
-        self.final_estimator_ = clone(
-            self.final_estimator or LogisticRegression(max_iter=2_000)
-        )
+        self.final_estimator_ = clone(self.final_estimator or LogisticRegression(max_iter=2_000))
         self.final_estimator_.fit(meta_features, meta_labels)
 
         self.estimators_ = [
-            clone(estimator).fit(features, labels)
-            for _, estimator in self.base_estimators
+            clone(estimator).fit(features, labels) for _, estimator in self.base_estimators
         ]
         self.n_features_in_ = features.shape[1]
         return self
@@ -211,9 +205,7 @@ def _build_estimator() -> Any:
             ("extra_trees", extra),
             ("random_forest", forest),
         ],
-        final_estimator=LogisticRegression(
-            C=0.5, max_iter=2_000, class_weight="balanced"
-        ),
+        final_estimator=LogisticRegression(C=0.5, max_iter=2_000, class_weight="balanced"),
         n_splits=5,
         passthrough=True,
     )
@@ -301,10 +293,7 @@ class ProbabilityModel:
         """Return calibrated P(YES resolves true) for one row."""
         if self.model is None:
             raise RuntimeError("Probability model is not loaded")
-        if isinstance(X, dict):
-            frame = pd.DataFrame([X])
-        else:
-            frame = X.copy()
+        frame = pd.DataFrame([X]) if isinstance(X, dict) else X.copy()
         missing = [column for column in self.feature_columns if column not in frame]
         if missing:
             raise ValueError(f"Missing model features: {missing}")
@@ -356,9 +345,7 @@ class ProbabilityModel:
         bundle = joblib.load(destination)
         if isinstance(bundle, dict) and "model" in bundle:
             self.model = bundle["model"]
-            self.feature_columns = list(
-                bundle.get("feature_columns") or FEATURE_COLUMNS
-            )
+            self.feature_columns = list(bundle.get("feature_columns") or FEATURE_COLUMNS)
             self.metadata = dict(bundle.get("metadata") or {})
         else:
             # Backward-compatible with a bare estimator saved by joblib.

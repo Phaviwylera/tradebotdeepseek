@@ -37,9 +37,7 @@ def parse_datetime(value: Any) -> datetime | None:
     except ValueError:
         # Gamma sometimes uses a date without a timezone.
         try:
-            parsed = datetime.strptime(text[:10], "%Y-%m-%d").replace(
-                tzinfo=timezone.utc
-            )
+            parsed = datetime.strptime(text[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except ValueError:
             return None
     if parsed.tzinfo is None:
@@ -140,7 +138,7 @@ def _level_parts(level: Any) -> tuple[Any, Any] | None:
         return level.price, level.size
     if isinstance(level, Mapping):
         return level.get("price"), level.get("size")
-    if isinstance(level, (tuple, list)) and len(level) >= 2:
+    if isinstance(level, tuple | list) and len(level) >= 2:
         return level[0], level[1]
     price = getattr(level, "price", None)
     size = getattr(level, "size", None)
@@ -209,7 +207,7 @@ class MarketScanner:
             payload = await self._get_json(http, "/markets", params)
             if isinstance(payload, Mapping):
                 payload = payload.get("data", payload.get("markets", []))
-            if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
+            if not isinstance(payload, Sequence) or isinstance(payload, str | bytes):
                 raise TypeError("Unexpected Gamma markets response")
 
             if not payload:
@@ -283,9 +281,7 @@ class MarketScanner:
             self._owns_http = True
         return self._http
 
-    async def _get_json(
-        self, http: Any, path: str, params: Mapping[str, str]
-    ) -> Any:
+    async def _get_json(self, http: Any, path: str, params: Mapping[str, str]) -> Any:
         last_error: Exception | None = None
         for attempt in range(3):
             try:

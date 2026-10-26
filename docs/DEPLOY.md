@@ -206,3 +206,19 @@ opening positions until you restart it — that is deliberate.
 | Container healthy but no signals | normal in DRY-RUN | arbitrage under 0.985 is rare; snipes need the final 2.4h |
 | `Risk blocked` rows | exposure/daily-loss caps | expected; inspect `reason` in the signals table |
 | xgboost missing at model load | artifact trained with ML extras | `pip install -r requirements-ml.txt` |
+
+---
+
+## 6. Vercel project settings that bite
+
+Two defaults in a fresh Vercel project surprise people hosting this console:
+
+| Setting | Default | Effect | Fix |
+|---|---|---|---|
+| **Deployment Protection → Vercel Authentication** | *All deployments except custom domains* on some teams | `*.vercel.app` URLs ask every visitor to log in | Project → Settings → Deployment Protection → apply to preview only (or disable) if the console should be publicly readable |
+| **Root Directory** | repo root | the build looks for `public/` at the repo root and finds the Python service | set Root Directory to `dashboard` |
+
+Deployment is then simply `git push` on the production branch, or
+`cd dashboard && npx vercel --prod` for a manual deploy. A project pointed at this
+repository with Root Directory `dashboard` and Output Directory `public` needs no
+build command at all.

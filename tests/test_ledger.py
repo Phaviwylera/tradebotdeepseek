@@ -9,13 +9,52 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ledger import Ledger
+from ledger import Ledger, ensure_writable
 
 
 def iso(delta_seconds: float = 0.0) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)).isoformat(
         timespec="milliseconds"
     )
+
+
+class LedgerPathTests(unittest.TestCase):
+    def test_unwritable_path_falls_back_to_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "file-not-dir" / "ledger.db"
+            target.parent.write_text("i am a file", encoding="utf-8")
+            resolved = ensure_writable(target)
+            self.assertNotEqual(resolved, target)
+            self.assertEqual(resolved.name, "ledger.db")
+            self.assertTrue(resolved.parent.is_dir())
+
+    def test_writable_path_is_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "nested" / "ledger.db"
+            self.assertEqual(ensure_writable(target), target)
+            self.assertTrue(target.parent.is_dir())
+
+    def test_ledger_still_opens_and_records_after_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked = Path(tmp) / "blocker" / "ledger.db"
+            blocked.parent.write_text("not a directory", encoding="utf-8")
+            ledger = Ledger(blocked)
+            try:
+                self.assertNotEqual(ledger.path, blocked)
+                self.assertEqual(ledger.configured_path, blocked)
+                ledger.record_start(mode="dry_run")
+                ledger.record_signal(
+                    market_id="0xfallback",
+                    token_id="token",
+                    side="BUY",
+                    price=0.5,
+                    size_usd=1.0,
+                    reason="ARB | DRY_RUN",
+                    expected_value=0.1,
+                )
+                self.assertTrue(ledger.path.exists())
+            finally:
+                ledger.close()
 
 
 class LedgerTests(unittest.TestCase):

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 import threading
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -18,10 +20,42 @@ def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def ensure_writable(path: Path) -> Path:
+    """Return a writable ledger path, falling back to the temp dir.
+
+    Free tiers (Render free, ephemeral containers) often point ``LEDGER_PATH``
+    at a directory that does not exist or is read-only. Crashing the whole bot
+    over that is worse than losing the audit trail, so fall back to a temp file
+    and say so loudly. The trader keeps running; the operator is told the path
+    changed.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        probe = path.parent / f".write-probe-{os.getpid()}"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return path
+    except OSError as exc:
+        fallback = Path(tempfile.gettempdir()) / "polymarket-bot" / path.name
+        try:
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.exception("Temp fallback for the ledger is not writable either")
+            raise
+        logger.warning(
+            "LEDGER_PATH %s is not writable (%s); using %s instead. "
+            "This ledger is EPHEMERAL and will be lost on restart.",
+            path,
+            exc,
+            fallback,
+        )
+        return fallback
+
+
 class Ledger:
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.configured_path = Path(path)
+        self.path = ensure_writable(self.configured_path)
         self._lock = threading.Lock()
         self._connection = sqlite3.connect(str(self.path), timeout=30.0, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row

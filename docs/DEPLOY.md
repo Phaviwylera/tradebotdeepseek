@@ -4,7 +4,9 @@ Three ways to run this project. Pick one runner for the bot — never two at onc
 
 | Target | What runs there | Cost | Good for |
 |---|---|---|---|
-| **Render** (recommended) | Bot + dashboard in one Web Service | Starter ~$7/mo (free sleeps) | Fastest path to a live URL, HTTPS included |
+| **Render free** | Bot + console in one Web Service | $0 (sleeps without traffic, no disk) | Getting it live in ten minutes, no card |
+| **Render Starter** | Same, always on, persistent ledger | ~$7/mo | Real DRY-RUN history |
+| **Oracle / GCP always-free VM** | Bot + console in Docker | $0 forever | A genuinely always-on free host |
 | **AWS EC2 + Docker** | Bot + dashboard behind loopback/nginx | t3.small, free tier eligible | Full control, private networking, your own domain |
 | **Vercel** | Dashboard only (static + serverless proxy) | Free | A public console pointed at a bot running elsewhere |
 
@@ -28,17 +30,26 @@ and review the ledger before considering LIVE.
 
 ## 1. Render (one service, dashboard included)
 
+The blueprint defaults to the **free** plan: no card, no disk, sleeps when idle.
+Free forensics first: [FREE_HOSTING.md](FREE_HOSTING.md).
+
 1. Push the repository to GitHub (already done for this fork).
 2. In Render: **New → Blueprint**, select the repo, **Apply**. `render.yaml`
    provisions a Web Service with:
    - build `pip install -r requirements.txt`
    - start `python main.py`
    - health check `GET /healthz`
-   - a 1 GB disk mounted at `/var/data` for `ledger.db` and `model.joblib`
    - a generated `DASHBOARD_TOKEN`
-3. Open the service URL. The console loads; paste the `DASHBOARD_TOKEN` value from
+   - `LEDGER_PATH=/tmp/ledger.db` (ephemeral on the free plan)
+3. Set the GitHub repository variable `BOT_URL` to the service URL and run
+   **Actions → Keep-alive** once, so the free instance does not spin down.
+4. Open the service URL. The console loads; paste the `DASHBOARD_TOKEN` value from
    **Environment** into **Connect** if you want token-protected reads.
-4. Verify the log lines below, then confirm `orders` stays at `0`.
+5. Verify the log lines below, then confirm `orders` stays at `0`.
+
+For 24/7 with a durable ledger: `cp deploy/render-starter.yaml render.yaml`,
+upgrade the service to Starter, and re-apply. That adds a 1 GB disk at
+`/var/data` and removes the sleep behaviour.
 
 ```text
 DRY-RUN MODE: no authenticated CLOB requests or orders
@@ -58,9 +69,16 @@ trading loop and the console.
 
 ### Free-tier warning
 
-Render free instances spin down after inactivity — the loop would stop — and
-cannot attach a disk. Use `plan: starter` (or a paid worker, if you prefer no
-public port) for anything continuous.
+Render free instances spin down after ~15 minutes without traffic — the loop
+stops — and cannot attach a disk. The repo mitigates both (keep-alive workflow,
+`/tmp` ledger) but does not pretend they are equivalent to a real host:
+
+- the ledger is lost on every deploy or restart;
+- GitHub's scheduler is best-effort, so spin-downs still happen occasionally;
+- **never set `LIVE=true` on an ephemeral instance** — risk state resets with it.
+
+See [FREE_HOSTING.md](FREE_HOSTING.md) for the honest comparison, including the
+two always-free VM options (Oracle Always Free, Google e2-micro).
 
 ### Scaling
 
@@ -199,6 +217,8 @@ opening positions until you restart it — that is deliberate.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `No open ports detected` on Render | deployed as a worker | use the web service in `render.yaml` |
+| Render free service keeps sleeping | no pinger configured | set the `BOT_URL` repo variable; run the Keep-alive workflow |
+| Audit history vanished after a deploy | free plan has no disk | expected on free; use `deploy/render-starter.yaml` |
 | Console shows *demo data* | API not reachable or token rejected | open **Connect**, check URL/token; `curl <url>/healthz` |
 | `/api/status` returns 401 | `DASHBOARD_TOKEN` set | send `Authorization: Bearer <token>` or `?token=` |
 | `ledger not created yet` | bot has not finished its first cycle | wait one interval; check `docker compose logs` |

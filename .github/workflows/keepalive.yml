@@ -1,0 +1,57 @@
+name: Keep-alive
+
+# Render's free plan stops a service after ~15 minutes without traffic, which
+# also stops the trading loop. This workflow pings the bot's health endpoint
+# every 5 minutes from GitHub's scheduler, which costs nothing on a public repo.
+#
+# Setup (once):
+#   Settings > Secrets and variables > Actions > Variables > New variable
+#       BOT_URL = https://<your-service>.onrender.com
+#
+# Caveats worth knowing:
+#   - GitHub cron is best effort; runs can be delayed by several minutes. A
+#     5-minute cadence leaves room for that, but it is not a hard guarantee.
+#   - GitHub disables scheduled workflows after ~60 days without repository
+#     activity. Any push re-enables it.
+#   - This keeps the PROCESS alive; it does not make Render's free plan a
+#     supported 24/7 host. For that, see docs/FREE_HOSTING.md.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    name: Ping /healthz
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake the bot
+        env:
+          BOT_URL: ${{ vars.BOT_URL }}
+        run: |
+          set -u
+          if [ -z "${BOT_URL}" ]; then
+            echo "::notice::BOT_URL is not set. Add it under Settings > Secrets and variables > Actions > Variables. Skipping."
+            exit 0
+          fi
+
+          url="${BOT_URL%/}/healthz"
+          for attempt in 1 2 3 4; do
+            if body=$(curl -fsS --max-time 30 "$url"); then
+              echo "OK (attempt ${attempt}): ${body}"
+              exit 0
+            fi
+            echo "attempt ${attempt} failed; a cold start can take ~60s"
+            sleep 20
+          done
+
+          echo "::error::Could not reach ${url} after 4 attempts. Check the Render service and the BOT_URL variable."
+          exit 1

@@ -30,6 +30,18 @@ jobs:
       - name: ruff format check
         run: ruff format --check .
 
+  config:
+    name: Deploy configs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml==6.0.2
+      - name: Validate render/compose/workflow/vercel configs
+        run: python scripts/check_configs.py
+
   test:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

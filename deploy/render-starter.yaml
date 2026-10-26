@@ -1,0 +1,62 @@
+# Starter-plan variant of the Render blueprint (paid, ~$7/month).
+#
+# Use this only if you want the bot to run 24/7 without a keep-alive pinger AND
+# keep its audit ledger across deploys. To switch:
+#
+#   cp deploy/render-starter.yaml render.yaml
+#   git commit -am "render: starter plan with persistent disk" && git push
+#
+# Then upgrade the service to Starter in the Render dashboard and re-apply.
+#
+# Differences from the free file:
+#   - plan: starter
+#   - disk polymarket-data mounted at /var/data (1 GB)
+#   - LEDGER_PATH / MODEL_PATH point at the disk instead of /tmp
+#   - MAX_MARKETS_PER_CYCLE back to 40 (2 GB RAM is comfortable)
+
+services:
+  - type: web
+    name: polymarket-calibrated-bot
+    runtime: python
+    plan: starter
+    region: oregon
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /healthz
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: LIVE
+        value: "false"
+      - key: BANKROLL
+        value: "200"
+      - key: MAX_BET
+        value: "20"
+      - key: LEDGER_PATH
+        value: /var/data/ledger.db
+      - key: MODEL_PATH
+        value: /var/data/model.joblib
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: SERVE_DASHBOARD
+        value: "true"
+      - key: DASHBOARD_TOKEN
+        generateValue: true
+      - key: SCAN_INTERVAL_SECONDS
+        value: "60"
+      - key: MAX_MARKETS_PER_CYCLE
+        value: "40"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: POLYGON_PRIVATE_KEY
+        sync: false
+      - key: POLYMARKET_SIGNATURE_TYPE
+        value: "0"
+      - key: POLYMARKET_FUNDER
+        sync: false
+    disk:
+      name: polymarket-data
+      mountPath: /var/data
+      sizeGB: 1

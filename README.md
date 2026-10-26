@@ -313,8 +313,11 @@ intervals, the loop is stalled even though the container is up.
    (or **New → Blueprint** and pick the repo). `render.yaml` provisions a **free**
    Web Service with a health check on `/healthz` and a generated
    `DASHBOARD_TOKEN`.
-3. Set the repository variable `BOT_URL` to the service URL so the bundled
-   keep-alive workflow stops the free instance from spinning down.
+3. Leave the keep-alive as shipped: it pings the URL in
+   [`deploy/bot-url.txt`](deploy/bot-url.txt) every 5 minutes so the free instance
+   stops spinning down (a repo variable `BOT_URL` overrides it). If Actions shows
+   no Keep-alive runs yet, click **Run workflow** once or add a free external
+   pinger — see [keeping it awake](docs/FREE_HOSTING.md#if-the-keep-alive-never-fires).
 4. Leave `LIVE=false`. Confirm the logs show `DRY-RUN MODE`.
 5. Open the service URL — the bot is serving the console on the same port.
    The URL is `https://<name>.onrender.com`, where `<name>` is

@@ -24,6 +24,7 @@ const state = {
   nextRefreshAt: 0,
   paused: false,
   loading: false,
+  waking: false,
 };
 
 const el = {
@@ -85,12 +86,24 @@ function endpoint(path = "/api/status") {
 
 // ------------------------------------------------------------------- data
 
+// A free-tier bot can take ~50s to wake. The proxy rides most of that out, so
+// the browser must be patient too — a 12s timeout used to fail every cold start.
+const CLIENT_TIMEOUT_MS = 70_000;
+const WAKING_RETRY_SECONDS = 10;
+
+function failure(kind, detail) {
+  const error = new Error(detail || kind);
+  error.kind = kind;
+  error.detail = detail || "";
+  return error;
+}
+
 async function fetchStatus() {
   if (state.loading) return;
   state.loading = true;
   setCountdownLabel();
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
+  const timeout = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
   try {
     const headers = {};
     if (state.settings.apiToken) {
@@ -102,39 +115,63 @@ async function fetchStatus() {
       cache: "no-store",
     });
 
-    if (response.status === 401) {
-      // The bot is up; it just wants its bearer token. Say so precisely, because
-      // "unauthorized" alone sends people looking for a broken deploy.
-      throw new Error("token-required");
-    }
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("json")
+      ? await response.json().catch(() => null)
+      : null;
+
     if (!response.ok) {
+      // The bot is asleep and the host is booting it. Not an error: wait.
+      if (payload && payload.waking) throw failure("waking");
+      // The bot is up but wants its bearer token.
+      if (response.status === 401) throw failure("token-required", payload && payload.hint);
       // A static-only host has no proxy function; treat that as "not wired up".
       if (response.status === 404 || response.status === 405) {
-        throw new Error("no status API at this address");
+        throw failure("unconfigured", "no status API at this address");
       }
-      throw new Error(`status API returned HTTP ${response.status}`);
+      if (response.status === 503 && payload && payload.configured === false) {
+        throw failure("unconfigured", payload.error);
+      }
+      throw failure("error", (payload && payload.error) || `status API returned HTTP ${response.status}`);
     }
-    const contentType = response.headers.get("content-type") || "";
-    if (!contentType.includes("json")) {
-      throw new Error("no status API at this address");
-    }
-    const payload = await response.json();
+
     if (payload && payload.configured === false) {
-      throw new Error(payload.error || "status proxy is not configured");
+      throw failure("unconfigured", payload.error || "status proxy is not configured");
     }
     if (!payload || typeof payload !== "object") {
-      throw new Error("unexpected payload from status API");
+      throw failure("error", "unexpected payload from status API");
     }
+    state.waking = false;
     applyPayload(payload, "live");
   } catch (error) {
-    state.source = "demo";
-    applyPayload(buildDemoPayload(), "demo", String(error.message || error));
+    const kind = error.kind || (error.name === "AbortError" ? "timeout" : "error");
+    if (kind === "waking") {
+      enterWaking();
+    } else {
+      state.source = "demo";
+      applyPayload(buildDemoPayload(), "demo", { kind, detail: error.detail || error.message });
+    }
   } finally {
     clearTimeout(timeout);
     state.loading = false;
     state.lastFetchAt = new Date();
-    scheduleNext();
+    scheduleNext(state.waking ? WAKING_RETRY_SECONDS : REFRESH_SECONDS);
   }
+}
+
+function enterWaking() {
+  state.waking = true;
+  if (state.source === "live" && state.lastPayload) {
+    // Keep the last good snapshot on screen and explain the pause.
+    showNotice({
+      tone: "info",
+      title: "Bot is waking up",
+      text: "A free instance was asleep. Showing the last snapshot; retrying every 10s until it answers.",
+    });
+    return;
+  }
+  state.source = "demo";
+  applyPayload(buildDemoPayload(), "demo", { kind: "waking" });
 }
 
 // ------------------------------------------------------------------- demo
@@ -279,7 +316,7 @@ function buildDemoPayload() {
 
 // --------------------------------------------------------------- rendering
 
-function applyPayload(payload, source, failureReason) {
+function applyPayload(payload, source, failure) {
   state.lastPayload = payload;
   state.source = source;
 
@@ -293,7 +330,7 @@ function applyPayload(payload, source, failureReason) {
   el.connPill.textContent = isDemo ? "demo" : "live api";
   el.connPill.dataset.tone = isDemo ? "demo" : "live";
 
-  renderNotice(payload, source, failureReason);
+  renderNotice(payload, source, failure);
   renderKpis(payload, runtime);
   renderPipeline(payload, runtime);
   renderConnection(payload, source);
@@ -301,21 +338,35 @@ function applyPayload(payload, source, failureReason) {
   renderOrders(payload.recent_orders || []);
 }
 
-function renderNotice(payload, source, failureReason) {
+function renderNotice(payload, source, failure) {
   const runtime = payload.runtime || {};
   const stale = Number(payload.stale_seconds);
   const staleLimit = 180;
+  const kind = typeof failure === "string" ? "" : (failure && failure.kind) || "";
+  const detail = typeof failure === "string" ? failure : (failure && failure.detail) || "";
+  const reason = typeof failure === "string" ? failure : detail;
+
+  if (kind === "waking") {
+    showNotice({
+      tone: "info",
+      title: "Bot is waking up",
+      text: "A free instance was asleep. This page retries every 10s and switches to live data as soon as it answers — no action needed.",
+    });
+    return;
+  }
 
   if (source === "demo") {
-    const reason = failureReason || "";
-    const needsToken = reason === "token-required" || /unauthor|dashboard token/i.test(reason);
+    const needsToken =
+      kind === "token-required" || /unauthor|dashboard token|BOT_API_TOKEN/i.test(reason);
     showNotice({
       tone: needsToken ? "info" : "warn",
       title: needsToken ? "Token required" : "Demo data",
       text: needsToken
-        ? "The bot is running, but its read-only API wants a token. Open Connect and paste the DASHBOARD_TOKEN from your host's environment (Render: Environment tab)."
+        ? detail && /BOT_API_TOKEN/i.test(detail)
+          ? detail
+          : "The bot is running, but its read-only API wants a token. Open Connect and paste the DASHBOARD_TOKEN from your host's environment (Render: Environment tab)."
         : reason
-          ? `Showing sample data — ${reason}. Connect a bot to see live state.`
+          ? `Showing sample data — ${String(reason).replace(/\.+$/, "")}. Connect a bot to see live state.`
           : "Showing sample data. Connect a bot to see live state.",
       actionLabel: needsToken ? "Paste token" : "Connect",
       action: openDialog,
@@ -372,6 +423,7 @@ function showNotice({ tone, title, text, actionLabel, action }) {
     el.noticeAction.onclick = action;
   } else {
     el.noticeAction.hidden = true;
+    el.noticeAction.textContent = "";
     el.noticeAction.onclick = null;
   }
   el.notice.hidden = false;
@@ -631,12 +683,12 @@ function formatDuration(seconds) {
 
 // -------------------------------------------------------------- scheduling
 
-function scheduleNext() {
+function scheduleNext(seconds = REFRESH_SECONDS) {
   clearTimeout(state.timer);
-  state.nextRefreshAt = Date.now() + REFRESH_SECONDS * 1000;
+  state.nextRefreshAt = Date.now() + seconds * 1000;
   setCountdownLabel();
   if (!state.paused) {
-    state.timer = setTimeout(fetchStatus, REFRESH_SECONDS * 1000);
+    state.timer = setTimeout(fetchStatus, seconds * 1000);
   }
 }
 
@@ -691,7 +743,7 @@ function wireControls() {
     el.dialog.close();
     state.paused = false;
     el.autoRefresh.checked = true;
-    applyPayload(buildDemoPayload(), "demo", "demo data selected");
+    applyPayload(buildDemoPayload(), "demo", { kind: "demo", detail: "demo data selected" });
     scheduleNext();
   });
 

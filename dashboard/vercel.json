@@ -47,5 +47,10 @@
         }
       ]
     }
-  ]
+  ],
+  "functions": {
+    "api/status.js": {
+      "maxDuration": 60
+    }
+  }
 }

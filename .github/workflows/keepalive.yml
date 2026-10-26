@@ -4,9 +4,13 @@ name: Keep-alive
 # also stops the trading loop. This workflow pings the bot's health endpoint
 # every 5 minutes from GitHub's scheduler, which costs nothing on a public repo.
 #
-# Setup (once):
-#   Settings > Secrets and variables > Actions > Variables > New variable
-#       BOT_URL = https://<your-service>.onrender.com
+# Where the URL comes from, in order:
+#   1. the repository variable BOT_URL
+#      (Settings > Secrets and variables > Actions > Variables), else
+#   2. the first non-comment line of deploy/bot-url.txt, which ships filled in.
+#
+# So it works out of the box; the variable is only needed when you deploy
+# somewhere else and would rather not commit the URL.
 #
 # Caveats worth knowing:
 #   - GitHub cron is best effort; runs can be delayed by several minutes. A
@@ -33,19 +37,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Wake the bot
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve the bot URL
+        id: target
         env:
           BOT_URL: ${{ vars.BOT_URL }}
         run: |
-          set -u
-          if [ -z "${BOT_URL}" ]; then
-            echo "::notice::BOT_URL is not set. Add it under Settings > Secrets and variables > Actions > Variables. Skipping."
+          set -eu
+          url="${BOT_URL:-}"
+          if [ -z "${url}" ] && [ -f deploy/bot-url.txt ]; then
+            url="$(grep -v '^[[:space:]]*#' deploy/bot-url.txt | grep -v '^[[:space:]]*$' | head -1 | tr -d '[:space:]')"
+          fi
+          if [ -z "${url}" ]; then
+            echo "::notice::No bot URL. Set the repository variable BOT_URL or fill in deploy/bot-url.txt. Skipping."
+            echo "url=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "url=${url%/}" >> "$GITHUB_OUTPUT"
+          echo "Pinging ${url%/}/healthz"
 
-          url="${BOT_URL%/}/healthz"
+      - name: Wake the bot
+        if: steps.target.outputs.url != ''
+        env:
+          URL: ${{ steps.target.outputs.url }}
+        run: |
+          set -u
           for attempt in 1 2 3 4; do
-            if body=$(curl -fsS --max-time 30 "$url"); then
+            if body=$(curl -fsS --max-time 30 "${URL}/healthz"); then
               echo "OK (attempt ${attempt}): ${body}"
               exit 0
             fi
@@ -53,5 +75,5 @@ jobs:
             sleep 20
           done
 
-          echo "::error::Could not reach ${url} after 4 attempts. Check the Render service and the BOT_URL variable."
+          echo "::error::Could not reach ${URL}/healthz after 4 attempts. Check the Render service and the deploy/bot-url.txt value."
           exit 1

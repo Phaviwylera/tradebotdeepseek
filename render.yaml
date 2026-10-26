@@ -1,0 +1,32 @@
+services:
+  - type: worker
+    name: polymarket-calibrated-bot
+    runtime: python
+    plan: starter
+    region: oregon
+    autoDeploy: true
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: LIVE
+        value: "false"
+      - key: BANKROLL
+        value: "200"
+      - key: MAX_BET
+        value: "20"
+      - key: LEDGER_PATH
+        value: /var/data/ledger.db
+      - key: MODEL_PATH
+        value: /var/data/model.joblib
+      - key: POLYGON_PRIVATE_KEY
+        sync: false
+      - key: POLYMARKET_SIGNATURE_TYPE
+        value: "0"
+      - key: POLYMARKET_FUNDER
+        sync: false
+    disk:
+      name: polymarket-data
+      mountPath: /var/data
+      sizeGB: 1

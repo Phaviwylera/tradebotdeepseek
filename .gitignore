@@ -1,0 +1,25 @@
+# Secrets and local state
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+*.joblib
+model.joblib
+
+# Local Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Data / logs
+data/
+logs/
+*.log

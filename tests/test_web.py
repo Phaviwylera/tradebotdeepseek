@@ -316,8 +316,15 @@ class HealthProbeTests(unittest.TestCase):
             markets_scanned=scanned,
             markets_evaluated=evaluated,
             signals_emitted=1,
-            risk={"equity": 200.0, "cash": 190.5, "exposure": 9.5, "realized_pnl": 0.0,
-                  "drawdown_pct": 0.0, "killed": False, "kill_reason": None},
+            risk={
+                "equity": 200.0,
+                "cash": 190.5,
+                "exposure": 9.5,
+                "realized_pnl": 0.0,
+                "drawdown_pct": 0.0,
+                "killed": False,
+                "kill_reason": None,
+            },
         )
 
     def test_healthy_loop_reports_vitals(self) -> None:

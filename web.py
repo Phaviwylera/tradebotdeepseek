@@ -461,9 +461,11 @@ def start_status_server(
 ) -> tuple[StatusHTTPServer, threading.Thread]:
     """Start the read-only server on a daemon thread and return it."""
     resolved_host, resolved_port = resolve_bind()
-    if host:
+    # Explicit values win, including 0: `port=0` means "pick an ephemeral port",
+    # which tests and embedded callers rely on.
+    if host is not None:
         resolved_host = host
-    if port:
+    if port is not None:
         resolved_port = port
 
     token = (

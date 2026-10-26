@@ -184,6 +184,27 @@ class StatusServerTests(unittest.TestCase):
         self.assertIn(b"Allow: GET, HEAD", response)
 
 
+class ExplicitPortTests(unittest.TestCase):
+    def test_port_zero_means_ephemeral_not_unset(self) -> None:
+        """port=0 must bind an ephemeral port even when PORT is in the env."""
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Ledger(Path(tmp) / "ledger.db")
+            ledger.record_start(mode="dry_run")
+            ledger.close()
+            with mock.patch.dict(os.environ, {"PORT": "8099"}, clear=False):
+                server, thread = web.start_status_server(
+                    Path(tmp) / "ledger.db", host="127.0.0.1", port=0
+                )
+            try:
+                self.assertNotEqual(server.server_address[1], 8099)
+                self.assertGreater(server.server_address[1], 0)
+            finally:
+                web.stop_status_server(server, thread)
+
+
 class LedgerlessServerTests(unittest.TestCase):
     def test_missing_ledger_reports_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

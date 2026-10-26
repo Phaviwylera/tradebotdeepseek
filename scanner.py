@@ -303,9 +303,9 @@ class MarketScanner:
             return None
         if _truthy(raw.get("archived")):
             return None
-        if raw.get("acceptingOrders") is False:
+        if "acceptingOrders" in raw and not _truthy(raw.get("acceptingOrders")):
             return None
-        if raw.get("enableOrderBook") is False:
+        if "enableOrderBook" in raw and not _truthy(raw.get("enableOrderBook")):
             return None
 
         condition_id = str(raw.get("conditionId") or "").strip()

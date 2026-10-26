@@ -1,0 +1,48 @@
+# Production compose file for an AWS EC2 box.
+#
+# The bot and the read-only status API share one named volume, so SQLite and
+# model artifacts survive container re-creation. Only the status API is bound
+# to localhost; nothing is exposed publicly by this file.
+
+services:
+  bot:
+    build: .
+    image: polymarket-bot:latest
+    container_name: polymarket-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LEDGER_PATH: /data/ledger.db
+      MODEL_PATH: /data/model.joblib
+    volumes:
+      - polymarket-data:/data
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  status-api:
+    image: polymarket-bot:latest
+    container_name: polymarket-status-api
+    restart: unless-stopped
+    command: ["python", "dashboard_api.py"]
+    environment:
+      LEDGER_PATH: /data/ledger.db
+      API_HOST: 127.0.0.1
+      API_PORT: "8099"
+      DASHBOARD_TOKEN: ${DASHBOARD_TOKEN:-}
+    volumes:
+      - polymarket-data:/data
+    ports:
+      - "127.0.0.1:8099:8099"
+    depends_on:
+      - bot
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  polymarket-data:

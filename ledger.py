@@ -6,6 +6,7 @@ import json
 import logging
 import sqlite3
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,24 @@ class Ledger:
                     size_shares REAL NOT NULL,
                     status TEXT NOT NULL,
                     response TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS runtime (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    mode TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    markets_scanned INTEGER NOT NULL DEFAULT 0,
+                    markets_evaluated INTEGER NOT NULL DEFAULT 0,
+                    signals_emitted INTEGER NOT NULL DEFAULT 0,
+                    equity REAL,
+                    cash REAL,
+                    exposure REAL,
+                    realized_pnl REAL,
+                    drawdown_pct REAL,
+                    killed INTEGER NOT NULL DEFAULT 0,
+                    kill_reason TEXT,
+                    last_error TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_signals_ts
@@ -150,6 +169,74 @@ class Ledger:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def record_start(self, *, mode: str) -> None:
+        """Publish mode/start time so a read-only dashboard can show state."""
+        now = utc_iso()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO runtime (id, mode, started_at, updated_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    mode = excluded.mode,
+                    started_at = excluded.started_at,
+                    updated_at = excluded.updated_at,
+                    markets_scanned = 0,
+                    markets_evaluated = 0,
+                    signals_emitted = 0,
+                    last_error = NULL
+                """,
+                (mode, now, now),
+            )
+
+    def record_cycle(
+        self,
+        *,
+        markets_scanned: int,
+        markets_evaluated: int,
+        signals_emitted: int,
+        risk: Mapping[str, Any],
+    ) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE runtime SET
+                    updated_at = ?,
+                    markets_scanned = ?,
+                    markets_evaluated = ?,
+                    signals_emitted = ?,
+                    equity = ?,
+                    cash = ?,
+                    exposure = ?,
+                    realized_pnl = ?,
+                    drawdown_pct = ?,
+                    killed = ?,
+                    kill_reason = ?,
+                    last_error = NULL
+                WHERE id = 1
+                """,
+                (
+                    utc_iso(),
+                    int(markets_scanned),
+                    int(markets_evaluated),
+                    int(signals_emitted),
+                    risk.get("equity"),
+                    risk.get("cash"),
+                    risk.get("exposure"),
+                    risk.get("realized_pnl"),
+                    risk.get("drawdown_pct"),
+                    1 if risk.get("killed") else 0,
+                    risk.get("kill_reason"),
+                ),
+            )
+
+    def record_error(self, message: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE runtime SET updated_at = ?, last_error = ? WHERE id = 1",
+                (utc_iso(), message[:1_000]),
+            )
 
     def has_recent_signal(
         self,

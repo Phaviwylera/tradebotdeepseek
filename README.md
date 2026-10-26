@@ -79,7 +79,8 @@ model.py      Calibrated stacking model, Bayesian anchor, joblib I/O
 strategy.py   Arbitrage, snipe, and model-edge signals
 risk.py       Kill switch, exposure, fills, settlements
 executor.py   Authenticated py-clob-client GTC execution
-ledger.py     SQLite signal/order audit log
+ledger.py     SQLite signal/order audit log and runtime heartbeat
+dashboard_api.py Read-only JSON bridge for the EC2 dashboard
 main.py       Async 60-second pipeline and lifecycle
 train_model.py Out-of-time evaluation and model export
 ```
@@ -189,6 +190,181 @@ docker run --rm -e LIVE=false -v polymarket-data:/data polymarket-bot
 ```
 
 The image runs as a non-root user and stores its ledger under `/data`.
+
+---
+
+## Deploy on AWS EC2 (recommended)
+
+`docker-compose.yml` runs two containers on one EC2 host:
+
+- `bot` — the trading loop, `restart: unless-stopped`, ledger in the named
+  volume `polymarket-data` at `/data`.
+- `status-api` — a read-only JSON bridge for your dashboard, bound to
+  `127.0.0.1:8099` only.
+
+Neither container publishes the bot. Only the status API is reachable, and only
+from the instance itself (or through the nginx that already serves your
+dashboard).
+
+### 1. Prepare the host
+
+Use an existing instance or a small new one (t3.small / 2 GB RAM is enough).
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-v2 git
+sudo usermod -aG docker "$USER"   # log out and back in
+```
+
+Security group: allow `22` (your IP only), `80`/`443` if the dashboard is public.
+Do **not** open `8099`.
+
+### 2. Get the code
+
+```bash
+sudo mkdir -p /opt/polymarket-bot
+sudo chown "$USER":"$USER" /opt/polymarket-bot
+git clone https://github.com/Phaviwylera/tradebotdeepseek.git /opt/polymarket-bot
+cd /opt/polymarket-bot
+cp .env.aws.example .env
+chmod 600 .env
+```
+
+Edit `.env`:
+
+```text
+LIVE=false
+BANKROLL=200
+MAX_BET=20
+LEDGER_PATH=/data/ledger.db
+MODEL_PATH=/data/model.joblib
+DASHBOARD_TOKEN=<openssl rand -hex 32>
+```
+
+Leave `POLYGON_PRIVATE_KEY` empty until you deliberately go live. Keep
+`LIVE=false` for at least a week.
+
+### 3. Start it
+
+```bash
+cd /opt/polymarket-bot
+docker compose up -d --build
+docker compose ps
+docker compose logs -f bot
+```
+
+Expected log lines:
+
+```text
+DRY-RUN MODE: no authenticated CLOB requests or orders
+Executor in DRY-RUN mode; no API credentials requested
+Ledger /data/ledger.db ready
+Market WebSocket connected
+Scanned N eligible markets (volume>5000, liquidity>1000)
+Cycle complete: markets=40 books=37 new_signals=0 risk={...}
+```
+
+There is no `No open ports detected` noise, because nothing expects a port.
+
+### 4. Make it survive reboot
+
+```bash
+sudo cp deploy/polymarket-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now polymarket-bot
+```
+
+Docker's `restart: unless-stopped` handles crashes; systemd handles boot.
+
+### 5. Persistence and audit
+
+```bash
+docker compose exec bot python - <<'PY'
+import sqlite3
+con = sqlite3.connect("/data/ledger.db")
+for table in ("signals", "orders", "runtime"):
+    print(table, con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+print(con.execute("SELECT mode, updated_at, markets_scanned, equity FROM runtime").fetchall())
+PY
+```
+
+While `LIVE=false`, `orders` must stay at `0` and every signal has
+`executed=0`. Back the volume up with:
+
+```bash
+docker run --rm -v polymarket-data:/data -v "$PWD":/backup alpine \
+  tar czf /backup/ledger-$(date +%F).tgz -C /data .
+```
+
+### 6. Connect the EC2 dashboard
+
+`dashboard_api.py` is read-only by construction: GET only, `query_only` SQLite
+connection, no order route, and it never receives `POLYGON_PRIVATE_KEY`.
+
+Endpoints (localhost:8099):
+
+| Path | Contents |
+|---|---|
+| `/api/health` | liveness |
+| `/api/status` | runtime mode, timestamps, risk, counts, recent rows |
+| `/api/signals?limit=50` | recent signals |
+| `/api/orders?limit=50` | recent orders |
+
+Two supported wiring options:
+
+1. **Dashboard server-side** (if your dashboard already runs on the same EC2
+   box): call `http://127.0.0.1:8099/api/status` with
+   `Authorization: Bearer $DASHBOARD_TOKEN`.
+2. **Dashboard in the browser**: add `deploy/nginx-bot-api.conf` to the nginx
+   `server` block that serves the dashboard, then fetch
+   `https://<your-domain>/bot-api/status`. Because both are same-origin, no CORS
+   change is needed. `ALLOWED_ORIGIN` exists if you must split origins.
+
+The status payload looks like:
+
+```json
+{
+  "ready": true,
+  "runtime": {
+    "mode": "dry_run",
+    "started_at": "2026-10-26T10:43:15.000+00:00",
+    "updated_at": "2026-10-26T10:45:19.000+00:00",
+    "markets_scanned": 40,
+    "markets_evaluated": 37,
+    "signals_emitted": 0,
+    "equity": 200.0,
+    "exposure": 0.0,
+    "drawdown_pct": 0.0,
+    "killed": 0,
+    "last_error": null
+  },
+  "stale_seconds": 4.2,
+  "counts": {"signals_total": 0, "signals_24h": 0, "orders_total": 0},
+  "recent_signals": [],
+  "recent_orders": []
+}
+```
+
+Show `stale_seconds` in the UI: if it exceeds roughly three scan intervals, the
+bot loop is stalled even though the container is up.
+
+### 7. Retire Render
+
+Only after the EC2 instance shows fresh `updated_at` values:
+
+- delete the Render Web Service (the one logging `No open ports detected`).
+
+Never run both at once. Two processes writing different SQLite files is merely
+confusing; two processes trading with `LIVE=true` can duplicate orders.
+
+### Resource notes
+
+- `xgboost` pulls `nvidia-nccl-cu12` (about 350 MB) even on CPU-only hosts. Add
+  `nvidia-nccl-cu12` to `.dockerignore` only if you switch to a CPU-only wheel;
+  otherwise budget ~1.5 GB of disk for the image.
+- Keep `MAX_MARKETS_PER_CYCLE` at 40 on a 2 GB instance.
+- The named volume, not the container, holds state. `docker compose down` keeps
+  it; `docker compose down -v` deletes the ledger.
 
 ---
 

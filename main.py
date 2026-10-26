@@ -90,6 +90,7 @@ class TradingBot:
 
         await asyncio.to_thread(self.executor.initialize)
         self.stream.start()
+        self.ledger.record_start(mode="live" if self.settings.live else "dry_run")
 
         since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(
             timespec="seconds"
@@ -115,6 +116,9 @@ class TradingBot:
                 logger.exception(
                     "Trading cycle failed; sleeping %ds before retry",
                     self.settings.error_sleep_seconds,
+                )
+                await asyncio.to_thread(
+                    self.ledger.record_error, "trading cycle failed (see logs)"
                 )
                 await self._wait_or_stop(self.settings.error_sleep_seconds)
                 continue
@@ -178,13 +182,23 @@ class TradingBot:
                     market.condition_id,
                 )
 
+        risk_status = self.risk.status()
         logger.info(
             "Cycle complete: markets=%d books=%d new_signals=%d risk=%s",
             len(markets),
             evaluated,
             generated,
-            self.risk.status(),
+            risk_status,
         )
+        try:
+            self.ledger.record_cycle(
+                markets_scanned=len(markets),
+                markets_evaluated=evaluated,
+                signals_emitted=generated,
+                risk=risk_status,
+            )
+        except Exception:
+            logger.exception("Could not publish runtime status")
 
     async def _evaluate_market(
         self, market: Market, yes_book: OrderBook, no_book: OrderBook

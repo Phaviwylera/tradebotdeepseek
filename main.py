@@ -9,13 +9,16 @@ requests or order placement.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import web
 from config import Settings
 from executor import ExecutionResult, OrderExecutor
 from features import build_features
@@ -69,6 +72,8 @@ class TradingBot:
         self._book_semaphore = asyncio.Semaphore(MAX_BOOK_CONCURRENCY)
         self._stop = asyncio.Event()
         self._shutdown_done = False
+        self._status_server: web.StatusHTTPServer | None = None
+        self._status_thread: threading.Thread | None = None
         self.stream = BookStream(
             [],
             self._on_book_update,
@@ -91,10 +96,9 @@ class TradingBot:
         await asyncio.to_thread(self.executor.initialize)
         self.stream.start()
         self.ledger.record_start(mode="live" if self.settings.live else "dry_run")
+        self._start_status_server()
 
-        since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(
-            timespec="seconds"
-        )
+        since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(timespec="seconds")
         logger.info(
             "Ledger %s ready; %d signals in the last 24h",
             self.ledger.path,
@@ -117,9 +121,7 @@ class TradingBot:
                     "Trading cycle failed; sleeping %ds before retry",
                     self.settings.error_sleep_seconds,
                 )
-                await asyncio.to_thread(
-                    self.ledger.record_error, "trading cycle failed (see logs)"
-                )
+                await asyncio.to_thread(self.ledger.record_error, "trading cycle failed (see logs)")
                 await self._wait_or_stop(self.settings.error_sleep_seconds)
                 continue
 
@@ -132,27 +134,43 @@ class TradingBot:
             return
         self._shutdown_done = True
         logger.info("Shutting down")
-        if (
-            self.settings.live
-            and self.settings.cancel_on_shutdown
-            and self.executor.initialized
-        ):
+        if self.settings.live and self.settings.cancel_on_shutdown and self.executor.initialized:
             try:
                 await asyncio.to_thread(self.executor.cancel_all)
             except Exception:
                 logger.exception("Failed to cancel open orders during shutdown")
         await self.stream.stop()
         await self.scanner.close()
+        if self._status_server is not None:
+            await asyncio.to_thread(
+                web.stop_status_server, self._status_server, self._status_thread
+            )
+            self._status_server = None
+            self._status_thread = None
         self.ledger.close()
         logger.info("Shutdown complete")
+
+    def _start_status_server(self) -> None:
+        """Serve the read-only API and dashboard without blocking the loop."""
+        if not self.settings.web_enabled:
+            logger.info("Status server disabled (WEB_ENABLED=false)")
+            return
+        try:
+            self._status_server, self._status_thread = web.start_status_server(
+                self.ledger.path,
+                host=self.settings.api_host or None,
+                port=self.settings.api_port or None,
+                serve_dashboard=self.settings.serve_dashboard,
+            )
+        except OSError:
+            # A busy port must never stop the trading loop.
+            logger.exception("Status server could not bind; trading continues without HTTP status")
 
     async def run_cycle(self) -> None:
         markets = await self.scanner.scan()
         markets = markets[: self.settings.max_markets_per_cycle]
         self.stream.set_assets(
-            token
-            for market in markets
-            for token in (market.token_yes, market.token_no)
+            token for market in markets for token in (market.token_yes, market.token_no)
         )
         self._prune_book_cache()
 
@@ -163,11 +181,9 @@ class TradingBot:
 
         evaluated = 0
         generated = 0
-        for market, result in zip(markets, fetched):
+        for market, result in zip(markets, fetched, strict=False):
             if isinstance(result, BaseException):
-                logger.warning(
-                    "Skipping market %s: %s", market.condition_id[:12], result
-                )
+                logger.warning("Skipping market %s: %s", market.condition_id[:12], result)
                 continue
             yes_book, no_book = result
             if yes_book is None or no_book is None:
@@ -227,14 +243,10 @@ class TradingBot:
             return None
 
         try:
-            features = build_features(
-                market, yes_book, news_sentiment=self.settings.news_sentiment
-            )
+            features = build_features(market, yes_book, news_sentiment=self.settings.news_sentiment)
             raw_probability = self.model.predict_proba(features)
         except Exception:
-            logger.exception(
-                "Model inference failed for market %s", market.condition_id
-            )
+            logger.exception("Model inference failed for market %s", market.condition_id)
             return None
 
         if not math.isfinite(raw_probability):
@@ -295,8 +307,7 @@ class TradingBot:
                 executed=False,
             )
             logger.info(
-                "DRY RUN signal %s token=%s price=%.4f size=$%.2f ev=$%.2f "
-                "reason=%s",
+                "DRY RUN signal %s token=%s price=%.4f size=$%.2f ev=$%.2f " "reason=%s",
                 prefix,
                 signal.token_id[:12],
                 signal.price,
@@ -345,11 +356,7 @@ class TradingBot:
                 side=signal.side,
                 price=signal.price,
                 size_usd=signal.size_usd,
-                reason=(
-                    signal.reason
-                    if can_trade
-                    else f"{signal.reason} | RISK_BLOCKED {reason}"
-                ),
+                reason=(signal.reason if can_trade else f"{signal.reason} | RISK_BLOCKED {reason}"),
                 expected_value=signal.expected_value,
                 executed=False,
             )
@@ -429,9 +436,7 @@ class TradingBot:
                 status="EXCEPTION",
                 response={"error": type(exc).__name__, "detail": str(exc)},
             )
-            logger.exception(
-                "Order submission failed token=%s", signal.token_id[:12]
-            )
+            logger.exception("Order submission failed token=%s", signal.token_id[:12])
             return None
 
         self.ledger.record_order(
@@ -445,9 +450,7 @@ class TradingBot:
         )
         return result
 
-    def _record_accepted(
-        self, signal_id: int, signal: Signal, result: ExecutionResult
-    ) -> None:
+    def _record_accepted(self, signal_id: int, signal: Signal, result: ExecutionResult) -> None:
         self.ledger.mark_signal_executed(signal_id, True)
         try:
             self.risk.record_fill(
@@ -462,9 +465,7 @@ class TradingBot:
                 signal.token_id[:12],
             )
 
-    async def _fetch_books(
-        self, market: Market
-    ) -> tuple[OrderBook | None, OrderBook | None]:
+    async def _fetch_books(self, market: Market) -> tuple[OrderBook | None, OrderBook | None]:
         yes_book, no_book = await asyncio.gather(
             self._get_book(market.token_yes),
             self._get_book(market.token_no),
@@ -501,10 +502,9 @@ class TradingBot:
             self._books[asset_id] = (time.monotonic(), book)
 
     async def _wait_or_stop(self, seconds: float) -> None:
-        try:
+        # A timeout simply means "keep going"; a set event means shutdown.
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._stop.wait(), timeout=seconds)
-        except asyncio.TimeoutError:
-            pass
 
     def _is_cooling_down(self, market_id: str, reason_prefix: str) -> bool:
         cooldown = self.settings.signal_cooldown_seconds
@@ -522,9 +522,7 @@ class TradingBot:
     def _prune_book_cache(self) -> None:
         cutoff = time.monotonic() - BOOK_CACHE_RETENTION_SECONDS
         stale = [
-            token_id
-            for token_id, (updated_at, _) in self._books.items()
-            if updated_at < cutoff
+            token_id for token_id, (updated_at, _) in self._books.items() if updated_at < cutoff
         ]
         for token_id in stale:
             self._books.pop(token_id, None)
@@ -588,10 +586,9 @@ async def async_main() -> None:
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
+        # Windows and some embedded loops do not support signal handlers.
+        with contextlib.suppress(NotImplementedError, RuntimeError):
             loop.add_signal_handler(sig, bot.stop)
-        except (NotImplementedError, RuntimeError):
-            pass
 
     try:
         await bot.start()
@@ -607,7 +604,7 @@ def main() -> None:
         logger.info("Interrupted")
     except Exception:
         logger.exception("Fatal startup/runtime error")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

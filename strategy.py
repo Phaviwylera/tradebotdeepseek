@@ -65,10 +65,7 @@ class StrategyEngine:
         pair_cost = yes_cost + no_cost
         pair_profit = shares * (1.0 - total)
         yes_share_of_cost = yes_cost / pair_cost if pair_cost > 0 else 0.5
-        reason = (
-            f"ARB YES+NO={total:.4f} "
-            f"profit_per_pair={1.0 - total:.4f} shares={shares:.2f}"
-        )
+        reason = f"ARB YES+NO={total:.4f} " f"profit_per_pair={1.0 - total:.4f} shares={shares:.2f}"
 
         return [
             Signal(

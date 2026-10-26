@@ -1,0 +1,3 @@
+# Tooling for local development and CI (never installed in the image).
+-r requirements.txt
+ruff==0.7.4

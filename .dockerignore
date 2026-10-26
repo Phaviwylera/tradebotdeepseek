@@ -1,4 +1,5 @@
 .git
+.github
 .gitignore
 .venv
 venv
@@ -10,11 +11,16 @@ __pycache__
 .env
 .env.*
 !.env.example
+!.env.aws.example
 *.db
 *.db-wal
 *.db-shm
 ledger.db*
+*.joblib
 logs
 data
-.pytest_cache
 tests
+docs
+node_modules
+.vercel
+dashboard/api

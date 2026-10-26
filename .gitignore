@@ -24,3 +24,8 @@ htmlcov/
 data/
 logs/
 *.log
+
+# Frontend tooling (the dashboard has no build step, but node_modules appears
+# as soon as someone runs a local linter)
+node_modules/
+.vercel/

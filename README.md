@@ -1,15 +1,64 @@
 # Polymarket Calibrated Trading Bot
 
+[![CI](https://github.com/Phaviwylera/tradebotdeepseek/actions/workflows/ci.yml/badge.svg)](https://github.com/Phaviwylera/tradebotdeepseek/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
+![Mode](https://img.shields.io/badge/default-DRY--RUN-2ea043)
+
 A persistent Python 3.11 service for Polymarket. It discovers active markets,
 ingests order books over WebSocket with REST fallback, evaluates three
 independent strategies, enforces hard risk limits, and writes every signal and
-submitted order to a SQLite ledger.
+submitted order to a SQLite ledger. A read-only operations console ships in the
+same repository and the same process.
 
 **Default mode is `LIVE=false` (DRY-RUN). No private key is required and no
 authenticated CLOB request or order is made.**
 
 This is not a profit guarantee. It is an execution and risk framework around
 concrete, measurable edges.
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/Phaviwylera/tradebotdeepseek.git
+cd tradebotdeepseek
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+python -m unittest discover -s tests -v   # 80 tests, no network needed
+python scripts/demo_server.py             # console on http://127.0.0.1:8099
+python main.py                            # the real DRY-RUN loop
+```
+
+`make help` lists the same targets (`make install`, `make test`, `make lint`,
+`make demo`, `make docker-build`).
+
+---
+
+## What runs where
+
+| Piece | Process | Public? |
+|---|---|---|
+| Trading loop (`main.py`) | long-lived async worker | never listens publicly by choice |
+| Read-only API + console (`web.py`) | thread inside the bot, or `dashboard_api.py` | `$PORT` on Render, loopback + nginx on EC2 |
+| Console UI (`dashboard/public/`) | static files, served by the bot or Vercel | yes, contains no data |
+| Vercel proxy (`dashboard/api/`) | serverless function | forwards `GET` reads to the bot |
+
+One service is enough: the bot serves the API and the console. Vercel is only for
+hosting the console elsewhere (and proxying reads to your bot). Vercel cannot run
+the bot — serverless functions have no persistent loop, no WAL SQLite and no
+WebSocket subscription.
+
+### Deploy
+
+| Target | Command / link |
+|---|---|
+| **Render** | [Blueprint deploy](https://render.com/deploy?repo=https://github.com/Phaviwylera/tradebotdeepseek) — web service + disk + health check | 
+| **AWS EC2** | `sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Phaviwylera/tradebotdeepseek/main/deploy/ec2-setup.sh)"` |
+| **Vercel** | `cd dashboard && npx vercel --prod`, then set `BOT_API_URL` |
+
+Full playbook, security groups, troubleshooting: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
 ---
 
@@ -69,6 +118,8 @@ arbitrage and sniping only.
 
 ---
 
+---
+
 ## Architecture
 
 ```text
@@ -80,9 +131,10 @@ strategy.py   Arbitrage, snipe, and model-edge signals
 risk.py       Kill switch, exposure, fills, settlements
 executor.py   Authenticated py-clob-client GTC execution
 ledger.py     SQLite signal/order audit log and runtime heartbeat
-dashboard_api.py Read-only JSON bridge for the EC2 dashboard
+web.py        Read-only JSON API + static console (single source of routes)
 main.py       Async 60-second pipeline and lifecycle
 train_model.py Out-of-time evaluation and model export
+dashboard/    Static console + Vercel proxy functions (no build step)
 ```
 
 Pipeline each cycle:
@@ -105,20 +157,26 @@ restart does not immediately re-fire the same order.
 
 ## Local setup (DRY-RUN)
 
-Python 3.11 is required.
+Python 3.11 is required (3.12 works too; CI tests both).
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
 cp .env.example .env             # optional; export the values you use
+
 python -m unittest discover -s tests -v
 python main.py
 ```
 
 You do **not** need `POLYGON_PRIVATE_KEY` for DRY-RUN. The bot uses a public
 CLOB client for books and the public market WebSocket.
+
+Only the runtime dependencies are installed above. `pip install -r
+requirements-ml.txt` adds `xgboost` and `lightgbm`, which are needed **only** to
+train a model or to load an artifact trained with them (that file is ~1.5 GB
+because of the CUDA runtime xgboost pulls in). The bot without a model runs
+arbitrage and sniping only, by design.
 
 The ledger defaults to `./ledger.db`:
 
@@ -128,6 +186,17 @@ sqlite3 ledger.db "select ts,order_id,status from orders order by id desc limit 
 ```
 
 In DRY-RUN, `orders` stays empty. A real order is never submitted.
+
+### Look at the console with sample data
+
+```bash
+python scripts/demo_server.py           # http://127.0.0.1:8099
+python scripts/demo_server.py --port 3000 --host 0.0.0.0
+```
+
+It seeds a throwaway SQLite ledger and serves the real endpoints — no wallet, no
+network, no account. The console is also deployed publicly from
+`dashboard/public/`; see [dashboard/README.md](dashboard/README.md).
 
 ---
 
@@ -153,174 +222,48 @@ In DRY-RUN, `orders` stays empty. A real order is never submitted.
 | `BOOK_STALENESS_SECONDS` | `20` | Maximum WebSocket cache age. |
 | `CANCEL_ON_SHUTDOWN` | `true` | Cancel open orders when the worker stops. |
 | `LOG_LEVEL` | `INFO` | Logging verbosity. |
+| `WEB_ENABLED` | `true` | Start the read-only HTTP server inside the bot. |
+| `SERVE_DASHBOARD` | `true` | Also serve `dashboard/public/` from the bot. |
+| `API_HOST` | `127.0.0.1`, or `0.0.0.0` when `PORT` is set | Bind address. |
+| `API_PORT` | `8099`, or `$PORT` when set | Bind port. |
+| `DASHBOARD_TOKEN` | — | Optional bearer token for `/api/*` reads. |
+| `ALLOWED_ORIGIN` | — | Optional CORS origin for a split-origin console. |
 
 All secrets are read from the environment. They are never written to the
-repository, SQLite, or logs.
+repository, SQLite, or logs. `Settings.public_summary()` is the only config
+object that is ever logged, and a test asserts it cannot leak a key or token.
 
 The kill switch is permanent for the process session. A restart is an explicit
 operator action, not an automatic recovery path.
 
 ---
 
-## Deploy on Render (Background Worker)
+## The read-only console
 
-1. Push this repository to GitHub.
-2. In Render, choose **New > Blueprint** and select the repository.
-   `render.yaml` provisions a Starter background worker and a 1 GB persistent
-   disk mounted at `/var/data`.
-3. Set `POLYGON_PRIVATE_KEY` in the Render dashboard as a secret. Leave it
-   empty while testing DRY-RUN.
-4. Keep `LIVE=false`. Deploy and verify logs show `DRY-RUN MODE`.
-5. Confirm the disk exists, `LEDGER_PATH=/var/data/ledger.db`, and transactions
-   survive a redeploy.
-6. Run at least one week of DRY-RUN before considering LIVE.
+`web.py` is the single implementation of the HTTP surface. `main.py` starts it on
+a daemon thread next to the trading loop; `dashboard_api.py` runs the same code as
+a standalone sidecar when you want the API in a process that cannot trade.
 
-Do not put the backend on Vercel. Serverless functions cannot host a persistent
-trading loop. Vercel is only appropriate for an optional static dashboard, which
-is not part of this repository.
+| Path | Contents | Auth |
+|---|---|---|
+| `/healthz` | liveness probe | never |
+| `/` | static console shell | never (no data) |
+| `/api/status` | runtime mode, risk state, counts, recent rows | `DASHBOARD_TOKEN` |
+| `/api/signals?limit=50` | recent signals | `DASHBOARD_TOKEN` |
+| `/api/orders?limit=50` | recent orders | `DASHBOARD_TOKEN` |
 
-SQLite and the persistent disk assume exactly **one** worker instance. Do not
-scale this service to multiple instances while sharing the same database file.
+Read-only by construction: `GET`/`HEAD` only (everything else is 405), the SQLite
+connection is `PRAGMA query_only=ON`, there is no order route, and the process
+never reads `POLYGON_PRIVATE_KEY`. Static assets are limited to a fixed extension
+whitelist inside one directory, with path traversal rejected after resolution.
 
-### Docker alternative
+The console itself shows mode, equity, exposure, realized PnL, drawdown, risk
+state, heartbeat age, pipeline counts, and the signal/order tables. It banners a
+tripped kill switch, a stalled loop, the last error, or "demo data" when nothing
+is connected. It refreshes every 15s, pauses when the tab is hidden, and never
+needs a build step.
 
-```bash
-docker build -t polymarket-bot .
-docker run --rm -e LIVE=false -v polymarket-data:/data polymarket-bot
-```
-
-The image runs as a non-root user and stores its ledger under `/data`.
-
----
-
-## Deploy on AWS EC2 (recommended)
-
-`docker-compose.yml` runs two containers on one EC2 host:
-
-- `bot` — the trading loop, `restart: unless-stopped`, ledger in the named
-  volume `polymarket-data` at `/data`.
-- `status-api` — a read-only JSON bridge for your dashboard, bound to
-  `127.0.0.1:8099` only.
-
-Neither container publishes the bot. Only the status API is reachable, and only
-from the instance itself (or through the nginx that already serves your
-dashboard).
-
-### 1. Prepare the host
-
-Use an existing instance or a small new one (t3.small / 2 GB RAM is enough).
-
-```bash
-sudo apt-get update
-sudo apt-get install -y docker.io docker-compose-v2 git
-sudo usermod -aG docker "$USER"   # log out and back in
-```
-
-Security group: allow `22` (your IP only), `80`/`443` if the dashboard is public.
-Do **not** open `8099`.
-
-### 2. Get the code
-
-```bash
-sudo mkdir -p /opt/polymarket-bot
-sudo chown "$USER":"$USER" /opt/polymarket-bot
-git clone https://github.com/Phaviwylera/tradebotdeepseek.git /opt/polymarket-bot
-cd /opt/polymarket-bot
-cp .env.aws.example .env
-chmod 600 .env
-```
-
-Edit `.env`:
-
-```text
-LIVE=false
-BANKROLL=200
-MAX_BET=20
-LEDGER_PATH=/data/ledger.db
-MODEL_PATH=/data/model.joblib
-DASHBOARD_TOKEN=<openssl rand -hex 32>
-```
-
-Leave `POLYGON_PRIVATE_KEY` empty until you deliberately go live. Keep
-`LIVE=false` for at least a week.
-
-### 3. Start it
-
-```bash
-cd /opt/polymarket-bot
-docker compose up -d --build
-docker compose ps
-docker compose logs -f bot
-```
-
-Expected log lines:
-
-```text
-DRY-RUN MODE: no authenticated CLOB requests or orders
-Executor in DRY-RUN mode; no API credentials requested
-Ledger /data/ledger.db ready
-Market WebSocket connected
-Scanned N eligible markets (volume>5000, liquidity>1000)
-Cycle complete: markets=40 books=37 new_signals=0 risk={...}
-```
-
-There is no `No open ports detected` noise, because nothing expects a port.
-
-### 4. Make it survive reboot
-
-```bash
-sudo cp deploy/polymarket-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now polymarket-bot
-```
-
-Docker's `restart: unless-stopped` handles crashes; systemd handles boot.
-
-### 5. Persistence and audit
-
-```bash
-docker compose exec bot python - <<'PY'
-import sqlite3
-con = sqlite3.connect("/data/ledger.db")
-for table in ("signals", "orders", "runtime"):
-    print(table, con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-print(con.execute("SELECT mode, updated_at, markets_scanned, equity FROM runtime").fetchall())
-PY
-```
-
-While `LIVE=false`, `orders` must stay at `0` and every signal has
-`executed=0`. Back the volume up with:
-
-```bash
-docker run --rm -v polymarket-data:/data -v "$PWD":/backup alpine \
-  tar czf /backup/ledger-$(date +%F).tgz -C /data .
-```
-
-### 6. Connect the EC2 dashboard
-
-`dashboard_api.py` is read-only by construction: GET only, `query_only` SQLite
-connection, no order route, and it never receives `POLYGON_PRIVATE_KEY`.
-
-Endpoints (localhost:8099):
-
-| Path | Contents |
-|---|---|
-| `/api/health` | liveness |
-| `/api/status` | runtime mode, timestamps, risk, counts, recent rows |
-| `/api/signals?limit=50` | recent signals |
-| `/api/orders?limit=50` | recent orders |
-
-Two supported wiring options:
-
-1. **Dashboard server-side** (if your dashboard already runs on the same EC2
-   box): call `http://127.0.0.1:8099/api/status` with
-   `Authorization: Bearer $DASHBOARD_TOKEN`.
-2. **Dashboard in the browser**: add `deploy/nginx-bot-api.conf` to the nginx
-   `server` block that serves the dashboard, then fetch
-   `https://<your-domain>/bot-api/status`. Because both are same-origin, no CORS
-   change is needed. `ALLOWED_ORIGIN` exists if you must split origins.
-
-The status payload looks like:
+Typical `/api/status` payload:
 
 ```json
 {
@@ -333,38 +276,90 @@ The status payload looks like:
     "markets_evaluated": 37,
     "signals_emitted": 0,
     "equity": 200.0,
+    "cash": 200.0,
     "exposure": 0.0,
+    "realized_pnl": 0.0,
     "drawdown_pct": 0.0,
-    "killed": 0,
+    "killed": false,
+    "kill_reason": null,
     "last_error": null
   },
   "stale_seconds": 4.2,
+  "uptime_seconds": 124.0,
   "counts": {"signals_total": 0, "signals_24h": 0, "orders_total": 0},
   "recent_signals": [],
   "recent_orders": []
 }
 ```
 
-Show `stale_seconds` in the UI: if it exceeds roughly three scan intervals, the
-bot loop is stalled even though the container is up.
+Show `stale_seconds` in any UI you build: if it exceeds roughly three scan
+intervals, the loop is stalled even though the container is up.
 
-### 7. Retire Render
+---
 
-Only after the EC2 instance shows fresh `updated_at` values:
+## Deploy
 
-- delete the Render Web Service (the one logging `No open ports detected`).
+### Render (one service, console included)
 
-Never run both at once. Two processes writing different SQLite files is merely
-confusing; two processes trading with `LIVE=true` can duplicate orders.
+1. Push this repository to GitHub.
+2. [Deploy the blueprint](https://render.com/deploy?repo=https://github.com/Phaviwylera/tradebotdeepseek)
+   (or **New → Blueprint** and pick the repo). `render.yaml` provisions a Web
+   Service with a health check on `/healthz`, a 1 GB disk at `/var/data`, and a
+   generated `DASHBOARD_TOKEN`.
+3. Leave `LIVE=false`. Confirm the logs show `DRY-RUN MODE`.
+4. Open the service URL — the bot is serving the console on the same port.
 
-### Resource notes
+`plan: starter` is required for anything continuous: free instances spin down
+after inactivity and cannot attach a disk. The previous `type: worker` service
+logged `No open ports detected` because a background worker cannot serve HTTP.
 
-- `xgboost` pulls `nvidia-nccl-cu12` (about 350 MB) even on CPU-only hosts. Add
-  `nvidia-nccl-cu12` to `.dockerignore` only if you switch to a CPU-only wheel;
-  otherwise budget ~1.5 GB of disk for the image.
-- Keep `MAX_MARKETS_PER_CYCLE` at 40 on a 2 GB instance.
-- The named volume, not the container, holds state. `docker compose down` keeps
-  it; `docker compose down -v` deletes the ledger.
+SQLite and the persistent disk assume exactly **one** instance. Do not scale this
+service to multiple instances while sharing the same database file.
+
+### AWS EC2 (Docker)
+
+```bash
+sudo bash -c "curl -fsSL https://raw.githubusercontent.com/Phaviwylera/tradebotdeepseek/main/deploy/ec2-setup.sh | bash"
+```
+
+The script installs Docker, clones to `/opt/polymarket-bot`, writes `.env` with a
+generated `DASHBOARD_TOKEN` (mode 600, never overwriting), starts the stack, waits
+for `/healthz`, and installs the systemd unit so it survives a reboot.
+
+Security group: `22` from your IP, `80`/`443` only if nginx serves the console.
+**Do not open `8099`.** The container publishes it on host loopback and nginx
+(`deploy/nginx-bot-api.conf`) is the supported way to expose it.
+
+```bash
+ssh -N -L 8099:127.0.0.1:8099 ec2-user@<host>   # then http://127.0.0.1:8099
+```
+
+### Docker anywhere
+
+```bash
+docker build -t polymarket-bot .            # ~350 MB, runtime only
+docker build -t polymarket-bot --build-arg INSTALL_ML=true .   # + xgboost/lightgbm
+docker run --rm -p 127.0.0.1:8099:8099 -e API_HOST=0.0.0.0 \
+  -e LIVE=false -v polymarket-data:/data polymarket-bot
+```
+
+The image runs as a non-root user, stores state under `/data`, and has a
+`HEALTHCHECK` that probes `/healthz`.
+
+### Vercel (console only)
+
+```bash
+cd dashboard && npx vercel --prod
+```
+
+Set `BOT_API_URL` (and `BOT_API_TOKEN` if the bot uses one). The proxy keeps the
+token server-side, so the browser never holds it and no CORS or mixed-content
+change is needed. Without it the console falls back to labelled sample data.
+
+Do not put the trading loop on Vercel. Serverless functions cannot host a
+persistent trading loop, a WAL SQLite file, or a WebSocket subscription.
+
+See [docs/DEPLOY.md](docs/DEPLOY.md) for the complete playbook.
 
 ---
 
@@ -392,9 +387,11 @@ AUC, and 10-bin expected calibration error (ECE). It warns when ECE exceeds
 To enable it:
 
 - Local: put it at `MODEL_PATH`.
-- Render: place it at `/var/data/model.joblib` on the persistent disk, or build
-  a private image that includes it. The file is gitignored by default so model
-  artifacts do not accidentally enter source control.
+- Render/EC2: place it at `/var/data/model.joblib` on the persistent disk, or
+  build an image that includes it (`--build-arg INSTALL_ML=true`). The file is
+  gitignored by default so model artifacts do not accidentally enter source
+  control. A model trained with xgboost/lightgbm needs those wheels installed to
+  load: `pip install -r requirements-ml.txt`.
 - Restart the worker. Logs should say `Calibrated model enabled`; otherwise the
   bot will report the degraded mode.
 
@@ -416,8 +413,9 @@ Complete this checklist:
    use `POLYMARKET_SIGNATURE_TYPE=1` or `2` plus the funder address.
 5. Set `BANKROLL=200`, `MAX_BET=20`, and keep `MAX_EXPOSURE_PCT` low. With the
    defaults, total open cost basis is capped near $60.
-6. Put `POLYGON_PRIVATE_KEY` only in the Render secret store.
-7. Set `LIVE=true`, deploy, and watch the first order end to end.
+6. Put `POLYGON_PRIVATE_KEY` only in the platform's secret store.
+7. Set `LIVE=true`, deploy, and watch the first order end to end. The console's
+   mode pill must read **LIVE** and the order row must carry an order id.
 8. Verify `orders` contains the API response and the wallet balance moved.
 9. Never raise limits to recover a loss. Investigate first.
 
@@ -427,23 +425,30 @@ conservative, but it does not cancel/requote stale resting orders every cycle.
 
 ---
 
-## Tests
-
-The required risk and arbitrage tests use only the standard library:
+## Tests and CI
 
 ```bash
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v     # 80 tests, offline, ~2s
+python -m ruff check .                      # lint
+python -m ruff format --check .             # formatting
 ```
 
 Covered:
 
-- Daily-loss kill switch and permanent session kill.
-- Maximum drawdown kill switch.
-- Exposure cap enforcement.
-- Two-leg YES+NO arbitrage signal shape and pair budget.
-- No-arbitrage threshold behavior.
-- Snipe time/price/EV gates.
-- Quarter-Kelly model sizing and confidence floor.
+| File | Covers |
+|---|---|
+| `test_risk.py` | Daily-loss + drawdown kill switches, permanent session kill, exposure cap |
+| `test_strategy.py` | Arbitration pair shape and budget, snipe gates, quarter-Kelly sizing, confidence floor |
+| `test_scanner.py` | Gamma market parsing, filters, outcome ordering, level aggregation, TTL math |
+| `test_features.py` | Exactly ten features in training order, finiteness, book edge cases |
+| `test_ledger.py` | Schema, WAL mode, signal/order round-trip, cooldown windows, heartbeat, restart |
+| `test_web.py` | Payload shape, token auth, 405 on writes, static whitelist, path traversal, bind resolution, parallel reads |
+| `test_executor.py` | DRY-RUN never initializes or submits, LIVE without a key fails fast |
+| `test_config.py` | Defaults, validation, secret redaction in `public_summary()` |
+
+`.github/workflows/ci.yml` runs lint, the suite on 3.11 and 3.12, `node --check`
+on the console bundle and Vercel functions, and a container build that must answer
+`/healthz`.
 
 ---
 

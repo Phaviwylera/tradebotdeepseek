@@ -46,9 +46,7 @@ def expected_calibration_error(
     return float(error)
 
 
-def evaluate(
-    model: ProbabilityModel, frame: pd.DataFrame, labels: np.ndarray
-) -> dict[str, float]:
+def evaluate(model: ProbabilityModel, frame: pd.DataFrame, labels: np.ndarray) -> dict[str, float]:
     probabilities = np.array(
         [model.predict_proba(frame.iloc[[index]]) for index in range(len(frame))]
     )
@@ -116,9 +114,7 @@ def main() -> None:
         train_X, train_y = X.iloc[:split], y[:split]
         test_X, test_y = X.iloc[split:], y[split:]
         train_timestamps = timestamps.iloc[:split] if timestamps is not None else None
-        model = ProbabilityModel().fit(
-            train_X, train_y, timestamps=train_timestamps
-        )
+        model = ProbabilityModel().fit(train_X, train_y, timestamps=train_timestamps)
         holdout_metrics = evaluate(model, test_X, test_y)
         logger.info("Out-of-time holdout calibration: %s", holdout_metrics)
         if holdout_metrics["ece_10"] > 0.10:

@@ -50,9 +50,7 @@ def build_features(
     bid_depth_5 = orderbook.depth("bid", 5)
     ask_depth_5 = orderbook.depth("ask", 5)
     total_depth = bid_depth_5 + ask_depth_5
-    imbalance = (
-        (bid_depth_5 - ask_depth_5) / total_depth if total_depth > 0.0 else 0.0
-    )
+    imbalance = (bid_depth_5 - ask_depth_5) / total_depth if total_depth > 0.0 else 0.0
 
     ttl_days = market.ttl_days(datetime.now(timezone.utc))
     if ttl_days is None:
@@ -71,10 +69,7 @@ def build_features(
         "spread_over_mid": float(spread / mid_price) if mid_price > 0 else 0.0,
     }
 
-    clean = {
-        key: float(value) if np.isfinite(value) else 0.0
-        for key, value in row.items()
-    }
+    clean = {key: float(value) if np.isfinite(value) else 0.0 for key, value in row.items()}
     return pd.DataFrame([clean], columns=FEATURE_COLUMNS)
 
 

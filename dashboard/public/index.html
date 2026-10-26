@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Polymarket Bot · Operations Console</title>
+    <meta
+      name="description"
+      content="Read-only operations console for the Polymarket calibrated trading bot: runtime health, risk state, signals and orders."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="sheet">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">◆</span>
+          <div class="brand-text">
+            <h1>Polymarket Bot</h1>
+            <p>Operations console · read-only</p>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <span class="pill" id="mode-pill" title="Runner mode reported by the bot">—</span>
+          <span class="pill pill-quiet" id="conn-pill" title="Data source">demo</span>
+          <button class="btn" id="refresh-btn" type="button">Refresh</button>
+          <button class="btn btn-ghost" id="connect-btn" type="button">Connect</button>
+        </div>
+      </header>
+
+      <div class="banner banner-warn" id="notice" hidden>
+        <strong id="notice-title">Demo data</strong>
+        <span id="notice-text"></span>
+        <button class="btn btn-tiny" id="notice-action" type="button" hidden></button>
+      </div>
+
+      <section class="kpis" aria-label="Runtime summary">
+        <article class="kpi">
+          <p class="kpi-label">Equity</p>
+          <p class="kpi-value" id="kpi-equity">—</p>
+          <p class="kpi-foot" id="kpi-equity-foot">USDC mark-to-cost</p>
+        </article>
+        <article class="kpi">
+          <p class="kpi-label">Exposure</p>
+          <p class="kpi-value" id="kpi-exposure">—</p>
+          <p class="kpi-foot" id="kpi-exposure-foot">0% of equity</p>
+        </article>
+        <article class="kpi">
+          <p class="kpi-label">Realized PnL</p>
+          <p class="kpi-value" id="kpi-pnl">—</p>
+          <p class="kpi-foot" id="kpi-pnl-foot">session</p>
+        </article>
+        <article class="kpi">
+          <p class="kpi-label">Drawdown</p>
+          <p class="kpi-value" id="kpi-drawdown">—</p>
+          <p class="kpi-foot">from peak equity</p>
+        </article>
+        <article class="kpi">
+          <p class="kpi-label">Risk state</p>
+          <p class="kpi-value kpi-value-sm" id="kpi-risk">—</p>
+          <p class="kpi-foot" id="kpi-risk-foot">within limits</p>
+        </article>
+        <article class="kpi">
+          <p class="kpi-label">Heartbeat</p>
+          <p class="kpi-value kpi-value-sm" id="kpi-heartbeat">—</p>
+          <p class="kpi-foot" id="kpi-heartbeat-foot">last cycle</p>
+        </article>
+      </section>
+
+      <section class="panels">
+        <article class="panel">
+          <header class="panel-head">
+            <h2>Pipeline</h2>
+            <span class="panel-meta" id="pipeline-meta">—</span>
+          </header>
+          <dl class="stat-grid">
+            <div><dt>Markets scanned</dt><dd id="stat-scanned">—</dd></div>
+            <div><dt>Markets evaluated</dt><dd id="stat-evaluated">—</dd></div>
+            <div><dt>Signals this cycle</dt><dd id="stat-cycle-signals">—</dd></div>
+            <div><dt>Signals (24h)</dt><dd id="stat-signals-24h">—</dd></div>
+            <div><dt>Signals (total)</dt><dd id="stat-signals-total">—</dd></div>
+            <div><dt>Orders (total)</dt><dd id="stat-orders-total">—</dd></div>
+            <div><dt>Uptime</dt><dd id="stat-uptime">—</dd></div>
+            <div><dt>Last error</dt><dd id="stat-error" class="mono-ellipsis">—</dd></div>
+          </dl>
+        </article>
+
+        <article class="panel">
+          <header class="panel-head">
+            <h2>Connection</h2>
+            <span class="panel-meta" id="conn-meta">auto-refresh idle</span>
+          </header>
+          <dl class="stat-grid stat-grid-tight">
+            <div><dt>Endpoint</dt><dd id="conn-endpoint" class="mono-ellipsis">demo</dd></div>
+            <div><dt>Ledger</dt><dd id="conn-ledger" class="mono-ellipsis">—</dd></div>
+            <div><dt>Auth</dt><dd id="conn-auth">—</dd></div>
+            <div><dt>Stale</dt><dd id="conn-stale">—</dd></div>
+          </dl>
+          <div class="toggle-row">
+            <label class="switch">
+              <input type="checkbox" id="auto-refresh" checked />
+              <span>Auto-refresh every 15s</span>
+            </label>
+            <span class="countdown" id="countdown"></span>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel panel-table">
+        <header class="panel-head">
+          <h2>Signals</h2>
+          <span class="panel-meta" id="signals-meta">—</span>
+        </header>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time (UTC)</th>
+                <th>Strategy</th>
+                <th>Market</th>
+                <th>Side</th>
+                <th class="num">Price</th>
+                <th class="num">Size</th>
+                <th class="num">EV</th>
+                <th>Status</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="signals-body">
+              <tr class="empty-row"><td colspan="9">No signals yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel panel-table">
+        <header class="panel-head">
+          <h2>Orders</h2>
+          <span class="panel-meta" id="orders-meta">—</span>
+        </header>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time (UTC)</th>
+                <th>Order ID</th>
+                <th>Token</th>
+                <th>Side</th>
+                <th class="num">Price</th>
+                <th class="num">Shares</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="orders-body">
+              <tr class="empty-row"><td colspan="7">No orders. DRY-RUN never submits an order.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <p>
+          Read-only console. It cannot place, cancel, or modify orders, and it never
+          receives a private key.
+        </p>
+        <p class="footer-dim">
+          Not investment advice. A bot on a public ledger is an audit trail, not a
+          profit guarantee.
+        </p>
+      </footer>
+    </div>
+
+    <dialog id="connect-dialog" class="dialog">
+      <form method="dialog" id="connect-form">
+        <h2>Connect to a bot</h2>
+        <p class="dialog-hint">
+          Point this console at a running bot's status API. Same-origin works when the
+          bot serves this page; otherwise use the HTTPS URL of your deployment.
+        </p>
+
+        <label for="api-base">API base URL</label>
+        <input
+          id="api-base"
+          name="api-base"
+          type="url"
+          placeholder="https://your-bot.onrender.com"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <p class="field-hint">Leave empty to use this page's own <code>/api/status</code>.</p>
+
+        <label for="api-token">Dashboard token <span class="optional">(optional)</span></label>
+        <input
+          id="api-token"
+          name="api-token"
+          type="password"
+          placeholder="DASHBOARD_TOKEN"
+          autocomplete="off"
+        />
+        <p class="field-hint">
+          Stored in this browser's <code>localStorage</code> only. Sent as a bearer token.
+        </p>
+
+        <div class="dialog-actions">
+          <button class="btn btn-ghost" value="cancel" type="button" id="use-demo">Use demo data</button>
+          <button class="btn btn-primary" value="connect" type="submit">Connect</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

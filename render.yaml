@@ -1,15 +1,32 @@
+# Render Blueprint — one service runs the bot AND serves the dashboard.
+#
+#   New > Blueprint > pick this repository > Apply
+#
+# Why a web service instead of a worker: the bot now serves its own read-only
+# status API and static dashboard on $PORT (see web.py), so a single Render Web
+# Service is enough. No separate frontend deploy is required.
+#
+# Cost note: Render free instances spin down after inactivity, which stops a
+# 24/7 trading loop, and free instances cannot attach a disk. Use at least the
+# `starter` plan for anything you intend to keep running.
+#
+# Safety: LIVE stays "false". Nothing is submitted until you deliberately add
+# POLYGON_PRIVATE_KEY and flip LIVE in the dashboard.
+
 services:
-  - type: worker
+  - type: web
     name: polymarket-calibrated-bot
     runtime: python
-    plan: starter
+    plan: starter            # switch to "free" only for a short-lived demo
     region: oregon
+    branch: main
     autoDeploy: true
+    healthCheckPath: /healthz
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python main.py
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: "3.11.9"
       - key: LIVE
         value: "false"
       - key: BANKROLL
@@ -20,6 +37,20 @@ services:
         value: /var/data/ledger.db
       - key: MODEL_PATH
         value: /var/data/model.joblib
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: SERVE_DASHBOARD
+        value: "true"
+      # Render generates the bearer token for the read-only API on first apply.
+      # Read it from the dashboard to unlock a token-protected console.
+      - key: DASHBOARD_TOKEN
+        generateValue: true
+      - key: SCAN_INTERVAL_SECONDS
+        value: "60"
+      - key: MAX_MARKETS_PER_CYCLE
+        value: "40"
+      - key: LOG_LEVEL
+        value: INFO
       - key: POLYGON_PRIVATE_KEY
         sync: false
       - key: POLYMARKET_SIGNATURE_TYPE

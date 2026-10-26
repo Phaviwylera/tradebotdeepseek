@@ -196,9 +196,7 @@ class RiskManager:
             daily_loss = (self.day_start_equity - equity) / self.day_start_equity
             if daily_loss >= self.max_daily_loss_pct:
                 self.killed = True
-                self.kill_reason = (
-                    f"daily loss {daily_loss:.2%} >= {self.max_daily_loss_pct:.2%}"
-                )
+                self.kill_reason = f"daily loss {daily_loss:.2%} >= {self.max_daily_loss_pct:.2%}"
                 logger.critical("KILL SWITCH: %s", self.kill_reason)
                 return
 
@@ -206,7 +204,5 @@ class RiskManager:
             drawdown = (self.peak_equity - equity) / self.peak_equity
             if drawdown >= self.max_drawdown_pct:
                 self.killed = True
-                self.kill_reason = (
-                    f"drawdown {drawdown:.2%} >= {self.max_drawdown_pct:.2%}"
-                )
+                self.kill_reason = f"drawdown {drawdown:.2%} >= {self.max_drawdown_pct:.2%}"
                 logger.critical("KILL SWITCH: %s", self.kill_reason)

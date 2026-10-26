@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements-dev.txt
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format check
+        run: ruff format --check .
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Byte-compile every module
+        run: python -m compileall -q . -x '(\.venv|node_modules)'
+
+  dashboard:
+    name: Dashboard syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check browser bundle
+        run: node --check dashboard/public/app.js
+      - name: Check serverless functions
+        run: |
+          node --check dashboard/api/status.js
+          node --check dashboard/api/health.js
+      - name: Validate vercel.json
+        run: node -e "JSON.parse(require('fs').readFileSync('dashboard/vercel.json','utf8'));console.log('vercel.json ok')"
+
+  container:
+    name: Container build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: polymarket-bot:ci
+      - name: Smoke test the container
+        run: |
+          docker run -d --name bot-ci -e WEB_ENABLED=true \
+            -e LEDGER_PATH=/data/ledger.db -p 18099:8099 \
+            -e API_HOST=0.0.0.0 -e API_PORT=8099 polymarket-bot:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18099/healthz; then ok=1; break; fi
+            sleep 2
+          done
+          echo
+          docker logs bot-ci | tail -20
+          test "${ok:-0}" = "1"
+          docker rm -f bot-ci

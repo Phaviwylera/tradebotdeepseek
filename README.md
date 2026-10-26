@@ -52,11 +52,18 @@ WebSocket subscription.
 
 ### Deploy
 
-| Target | Command / link |
-|---|---|
-| **Render** | [Blueprint deploy](https://render.com/deploy?repo=https://github.com/Phaviwylera/tradebotdeepseek) — web service + disk + health check | 
-| **AWS EC2** | `sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Phaviwylera/tradebotdeepseek/main/deploy/ec2-setup.sh)"` |
-| **Vercel** | `cd dashboard && npx vercel --prod`, then set `BOT_API_URL` |
+| Target | Cost | Command / link |
+|---|---|---|
+| **Render** (default: free plan) | $0, no card | [Blueprint deploy](https://render.com/deploy?repo=https://github.com/Phaviwylera/tradebotdeepseek) — web service + `/healthz` + keep-alive workflow |
+| **Oracle Cloud Always Free VM** | $0 forever | `sudo bash -c "$(curl -fsSL .../deploy/ec2-setup.sh)"` |
+| **Google Cloud e2-micro** | $0 forever | same bootstrap script |
+| **AWS EC2** | free tier / ~$8/mo | same bootstrap script |
+| **Vercel** | $0 | `cd dashboard && npx vercel --prod`, then set `BOT_API_URL` |
+
+No budget at all? Read **[docs/FREE_HOSTING.md](docs/FREE_HOSTING.md)** — it covers
+what each free tier actually gives you (free Render sleeps and has no disk; the
+repo ships a keep-alive workflow and an ephemeral-ledger mode for exactly that),
+plus the two always-free VM options.
 
 Full playbook, security groups, troubleshooting: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
@@ -214,7 +221,7 @@ network, no account. The console is also deployed publicly from
 | `MAX_DRAWDOWN_PCT` | `0.40` | Kill switch at 40% peak drawdown. |
 | `MAX_EXPOSURE_PCT` | `0.30` | Open cost basis as a fraction of equity. |
 | `MIN_EV` | `0.02` | Minimum edge/return threshold. |
-| `LEDGER_PATH` | `ledger.db` | SQLite file. Use a persistent disk on Render. |
+| `LEDGER_PATH` | `ledger.db` | SQLite file. Falls back to `/tmp/polymarket-bot/` with a warning if the path is not writable. |
 | `MODEL_PATH` | `model.joblib` | Optional calibrated model artifact. |
 | `SCAN_INTERVAL_SECONDS` | `60` | Pipeline cadence. |
 | `MAX_MARKETS_PER_CYCLE` | `40` | Book/strategy working set. |
@@ -303,18 +310,24 @@ intervals, the loop is stalled even though the container is up.
 
 1. Push this repository to GitHub.
 2. [Deploy the blueprint](https://render.com/deploy?repo=https://github.com/Phaviwylera/tradebotdeepseek)
-   (or **New → Blueprint** and pick the repo). `render.yaml` provisions a Web
-   Service with a health check on `/healthz`, a 1 GB disk at `/var/data`, and a
-   generated `DASHBOARD_TOKEN`.
-3. Leave `LIVE=false`. Confirm the logs show `DRY-RUN MODE`.
-4. Open the service URL — the bot is serving the console on the same port.
+   (or **New → Blueprint** and pick the repo). `render.yaml` provisions a **free**
+   Web Service with a health check on `/healthz` and a generated
+   `DASHBOARD_TOKEN`.
+3. Set the repository variable `BOT_URL` to the service URL so the bundled
+   keep-alive workflow stops the free instance from spinning down.
+4. Leave `LIVE=false`. Confirm the logs show `DRY-RUN MODE`.
+5. Open the service URL — the bot is serving the console on the same port.
 
-`plan: starter` is required for anything continuous: free instances spin down
-after inactivity and cannot attach a disk. The previous `type: worker` service
-logged `No open ports detected` because a background worker cannot serve HTTP.
+The free plan has no disk, so the ledger lives in `/tmp` and is lost on restart;
+`deploy/render-starter.yaml` is the $7/mo upgrade that adds a 1 GB disk at
+`/var/data` and removes the sleep. Details and the other free options:
+[docs/FREE_HOSTING.md](docs/FREE_HOSTING.md).
 
-SQLite and the persistent disk assume exactly **one** instance. Do not scale this
-service to multiple instances while sharing the same database file.
+The previous `type: worker` service logged `No open ports detected` because a
+background worker cannot serve HTTP, and workers are paid-only.
+
+SQLite assumes exactly **one** instance. Do not scale this service to multiple
+instances while sharing the same database file.
 
 ### AWS EC2 (Docker)
 

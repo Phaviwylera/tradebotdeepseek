@@ -1,14 +1,28 @@
-# Render Blueprint — one service runs the bot AND serves the dashboard.
+# Render Blueprint — ONE free Web Service runs the bot AND serves the console.
 #
 #   New > Blueprint > pick this repository > Apply
 #
-# Why a web service instead of a worker: the bot now serves its own read-only
-# status API and static dashboard on $PORT (see web.py), so a single Render Web
-# Service is enough. No separate frontend deploy is required.
+# Why a web service and not a worker: the bot serves its own read-only status
+# API and the static dashboard on $PORT (see web.py), so a single service is
+# enough. Background workers are paid-only on Render; web services have a free
+# plan. This file is configured for that free plan ($0, no card required).
 #
-# Cost note: Render free instances spin down after inactivity, which stops a
-# 24/7 trading loop, and free instances cannot attach a disk. Use at least the
-# `starter` plan for anything you intend to keep running.
+# Three things the free plan changes, all handled here:
+#
+#   1. Instances SPIN DOWN after ~15 minutes without traffic. A spin-down stops
+#      the trading loop. The repo ships .github/workflows/keepalive.yml, which
+#      pings /healthz every 5 minutes from GitHub Actions (free for public
+#      repos). Set the repository variable BOT_URL to this service's URL and the
+#      loop stays up. A cron job is best-effort, so treat it as "mostly awake".
+#
+#   2. There is NO persistent disk, so the ledger lives in /tmp and is lost on
+#      every deploy or restart. Signals and orders still stream to the console
+#      while the process lives. If you need long-term audit history, upgrade to
+#      the Starter plan and use deploy/render-starter.yaml, which adds a 1 GB
+#      disk at /var/data.
+#
+#   3. Free instances have 512 MB of RAM and 0.1 CPU. MAX_MARKETS_PER_CYCLE is
+#      kept low so the book-fetch fan-out stays comfortable.
 #
 # Safety: LIVE stays "false". Nothing is submitted until you deliberately add
 # POLYGON_PRIVATE_KEY and flip LIVE in the dashboard.
@@ -17,7 +31,7 @@ services:
   - type: web
     name: polymarket-calibrated-bot
     runtime: python
-    plan: starter            # switch to "free" only for a short-lived demo
+    plan: free
     region: oregon
     branch: main
     autoDeploy: true
@@ -33,22 +47,23 @@ services:
         value: "200"
       - key: MAX_BET
         value: "20"
+      # Ephemeral: survives restarts only within the same instance.
       - key: LEDGER_PATH
-        value: /var/data/ledger.db
+        value: /tmp/ledger.db
       - key: MODEL_PATH
-        value: /var/data/model.joblib
+        value: /tmp/model.joblib
       - key: API_HOST
         value: 0.0.0.0
       - key: SERVE_DASHBOARD
         value: "true"
-      # Render generates the bearer token for the read-only API on first apply.
-      # Read it from the dashboard to unlock a token-protected console.
+      # Render generates the bearer token on first apply. Read it under
+      # Environment to unlock a token-protected console.
       - key: DASHBOARD_TOKEN
         generateValue: true
       - key: SCAN_INTERVAL_SECONDS
         value: "60"
       - key: MAX_MARKETS_PER_CYCLE
-        value: "40"
+        value: "20"
       - key: LOG_LEVEL
         value: INFO
       - key: POLYGON_PRIVATE_KEY
@@ -57,7 +72,3 @@ services:
         value: "0"
       - key: POLYMARKET_FUNDER
         sync: false
-    disk:
-      name: polymarket-data
-      mountPath: /var/data
-      sizeGB: 1

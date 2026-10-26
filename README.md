@@ -95,6 +95,22 @@ The 95% hold probability is an assumption, not an observed fact. With
 is intentional. A market at 0.97 has little remaining edge under that
 assumption.
 
+The second and third conditions are the same inequality, so the code reconciles
+them: the highest ask that can ever fire is
+`hold / (1 + MIN_EV)` = `0.95 / 1.02` ≈ **0.9314**, not 0.97. At startup the
+engine logs the resulting gates so a quiet console is explainable rather than
+mysterious:
+
+```text
+Signal gates: ARB fires when yes_ask + no_ask < 0.985; SNIPE fires when
+ttl_days < 0.10 and the best ask is in [0.9300, 0.9314) with hold=0.95 min_ev=0.0200
+```
+
+Both gates are genuinely rare: a complete YES+NO set below 0.985, or a market
+resolving in under 2.4 hours trading under 0.9314. `/healthz` reports
+`markets_scanned`, `markets_evaluated` and `signals_last_cycle`, so "the bot is
+working and simply found no edge" looks different from "the bot is broken".
+
 ### 3. Calibrated model divergence
 
 `model.py` builds a time-ordered stacking ensemble over XGBoost, LightGBM,

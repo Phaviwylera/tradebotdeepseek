@@ -92,6 +92,9 @@ class TradingBot:
             )
         else:
             logger.warning("DRY-RUN MODE: no authenticated CLOB requests or orders")
+        # Without this, an idle console looks like a fault. The gates explain a
+        # quiet bot: both remaining strategies are deliberately rare.
+        logger.info("Signal gates: %s", self.strategy.describe_gates())
 
         await asyncio.to_thread(self.executor.initialize)
         self.stream.start()

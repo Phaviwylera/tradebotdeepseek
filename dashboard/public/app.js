@@ -103,7 +103,9 @@ async function fetchStatus() {
     });
 
     if (response.status === 401) {
-      throw new Error("unauthorized: this endpoint needs a dashboard token");
+      // The bot is up; it just wants its bearer token. Say so precisely, because
+      // "unauthorized" alone sends people looking for a broken deploy.
+      throw new Error("token-required");
     }
     if (!response.ok) {
       // A static-only host has no proxy function; treat that as "not wired up".
@@ -305,13 +307,17 @@ function renderNotice(payload, source, failureReason) {
   const staleLimit = 180;
 
   if (source === "demo") {
+    const reason = failureReason || "";
+    const needsToken = reason === "token-required" || /unauthor|dashboard token/i.test(reason);
     showNotice({
-      tone: "warn",
-      title: "Demo data",
-      text: failureReason
-        ? `Showing sample data — ${failureReason}. Connect a bot to see live state.`
-        : "Showing sample data. Connect a bot to see live state.",
-      actionLabel: "Connect",
+      tone: needsToken ? "info" : "warn",
+      title: needsToken ? "Token required" : "Demo data",
+      text: needsToken
+        ? "The bot is running, but its read-only API wants a token. Open Connect and paste the DASHBOARD_TOKEN from your host's environment (Render: Environment tab)."
+        : reason
+          ? `Showing sample data — ${reason}. Connect a bot to see live state.`
+          : "Showing sample data. Connect a bot to see live state.",
+      actionLabel: needsToken ? "Paste token" : "Connect",
       action: openDialog,
     });
     return;

@@ -18,7 +18,7 @@ import pandas as pd
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
 from features import FEATURE_COLUMNS
-from model import ProbabilityModel
+from model import BACKENDS, ProbabilityModel
 
 logger = logging.getLogger("train_model")
 LABEL_COLUMN = "resolved_yes"
@@ -72,6 +72,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fit on all rows without printing an out-of-time calibration report",
     )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default="full",
+        help=(
+            "full = XGBoost + LightGBM + sklearn (needs requirements-ml.txt); "
+            "light = scikit-learn only, small enough for a 512 MB free instance"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -114,7 +123,9 @@ def main() -> None:
         train_X, train_y = X.iloc[:split], y[:split]
         test_X, test_y = X.iloc[split:], y[split:]
         train_timestamps = timestamps.iloc[:split] if timestamps is not None else None
-        model = ProbabilityModel().fit(train_X, train_y, timestamps=train_timestamps)
+        model = ProbabilityModel().fit(
+            train_X, train_y, timestamps=train_timestamps, backend=args.backend
+        )
         holdout_metrics = evaluate(model, test_X, test_y)
         logger.info("Out-of-time holdout calibration: %s", holdout_metrics)
         if holdout_metrics["ece_10"] > 0.10:
@@ -126,6 +137,7 @@ def main() -> None:
         X,
         y,
         timestamps=timestamps,
+        backend=args.backend,
         metadata={
             "training_file": str(args.data),
             "holdout_metrics": holdout_metrics,

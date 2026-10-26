@@ -231,6 +231,9 @@ opening positions until you restart it — that is deliberate.
 | No signals *and* the page shows sample data | Vercel has no token | the banner now quotes the bot's public `/healthz`; open `<bot-url>/healthz` for the same numbers without any secret |
 | `/healthz` says `loop: error` | the last cycle raised | `last_error` carries the real exception now (e.g. market data unreachable), not "see logs" |
 | `/healthz` says `loop: stalled` | no heartbeat for >300 s | the process is up but the pipeline is wedged; read the logs |
+| `/healthz` → `model.loaded: false` | no artifact on the instance | set `MODEL_URL` (diskless hosts) or drop a `model.joblib` at `MODEL_PATH`. ARB + SNIPE still run |
+| `model.error: ModuleNotFoundError: xgboost` | a `full` artifact on an image without `requirements-ml.txt` | retrain with `--backend light`, or build with `--build-arg INSTALL_ML=true` |
+| Training set has < 60 rows | snapshots only exist after `SNAPSHOT_PATH` is set | capture first, train later; the join reports `too_late`/`no_label` counts |
 | `Risk blocked` rows | exposure/daily-loss caps | expected; inspect `reason` in the signals table |
 | xgboost missing at model load | artifact trained with ML extras | `pip install -r requirements-ml.txt` |
 

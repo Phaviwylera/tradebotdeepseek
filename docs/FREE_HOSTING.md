@@ -49,7 +49,9 @@ stops an idle service, so the repo is set up accordingly:
    Enable it once: **Actions → Keep-alive → Run workflow**. It should print
    `OK (attempt 1): {"ok":true,...}`. After that it runs every 5 minutes on its
    own. (GitHub disables schedules after ~60 days without repo activity; any push
-   turns it back on.)
+   turns it back on.) If no run appears at all, GitHub's scheduler has not picked
+   the workflow up yet — see
+   [If the keep-alive never fires](#if-the-keep-alive-never-fires).
 4. **Open the console** at `https://<service>.onrender.com/` — the bot serves it.
    Paste the `DASHBOARD_TOKEN` from Render → **Environment** into **Connect**.
    Or point the Vercel console at it: set `BOT_API_URL` in Vercel and it appears
@@ -121,6 +123,35 @@ used to look like a broken deploy. Now:
 | `keepalive.yml` | makes this rare by pinging every 5 minutes |
 
 Once awake the console switches to live data on its own. Nothing needs a refresh.
+
+### If the keep-alive never fires
+
+A brand-new scheduled workflow sometimes sits with **zero runs** for a while —
+GitHub starts tracking cron schedules lazily, and in the first hours after a
+workflow is merged the first tick can be an hour or more late. Diagnose it in one
+step: **Actions → Keep-alive**. If the list is empty even though the file is on
+`main`, the scheduler has not picked it up yet — the workflow itself is fine.
+
+Two ways forward, cheapest first:
+
+1. **Click Run workflow once** (Actions → Keep-alive → *Run workflow*). That
+   proves the URL and the ping work; the schedule usually starts ticking within
+   the next hour or so.
+2. **Add an external pinger** if you want a hard guarantee instead of a
+   best-effort one. Both of these have a free tier with no card:
+
+   | Service | Free interval | Setup |
+   |---|---|---|
+   | [UptimeRobot](https://uptimerobot.com) | 5 min | Add New Monitor → **HTTP(s)** → URL `https://<service>.onrender.com/healthz` → interval 5 min |
+   | [cron-job.org](https://cron-job.org) | 1 min | Create cronjob → same URL → every 5 minutes |
+
+   Point the monitor at `/healthz`, **not** `/`: `/healthz` needs no token, so the
+   pinger never has to hold a secret. Expect HTTP 200 with
+   `{"ok":true,"service":"polymarket-status"}`; a 502/HTML reply just means the
+   monitor caught a cold start — the next ping succeeds.
+
+Keeping both is fine: duplicate pings are cheap and idempotent, and two
+independent keepers is how you stop depending on one free tier's goodwill.
 
 ### What you give up on the free plan
 

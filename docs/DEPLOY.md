@@ -218,6 +218,7 @@ opening positions until you restart it — that is deliberate.
 |---|---|---|
 | `No open ports detected` on Render | deployed as a worker | use the web service in `render.yaml` |
 | Render free service keeps sleeping | no pinger configured | the keep-alive reads `deploy/bot-url.txt`; run **Actions → Keep-alive** once |
+| Keep-alive has zero runs in Actions | GitHub has not scheduled the new workflow yet | click **Run workflow** once, or add a free 5-min external pinger ([details](FREE_HOSTING.md#if-the-keep-alive-never-fires)) |
 | Console says "Bot is waking up" | free instance was stopped | wait ~40 s; the page retries itself. A pinger makes this rare |
 | Vercel console shows demo, Render console works | the Vercel proxy has no token | add `BOT_API_TOKEN` = the bot's `DASHBOARD_TOKEN` in Vercel (browser `Connect` only affects your browser) |
 | Audit history vanished after a deploy | free plan has no disk | expected on free; use `deploy/render-starter.yaml` |

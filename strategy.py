@@ -212,9 +212,11 @@ class StrategyEngine:
             ("NO", market.token_no, no_book),
         ):
             ask = book.best_ask
-            fee = market.fee_per_share(float(ask))
+            # One-sided books are normal near resolution, so `ask` is often
+            # None here: check it before touching it.
             if ask is None or not (self.snipe_min_ask <= ask < self.snipe_max_ask(market.fee_rate)):
                 continue
+            fee = market.fee_per_share(float(ask))
             ev_roi, _ = net_edge(
                 float(ask), self.effective_hold, market.fee_rate, market.fee_exponent
             )

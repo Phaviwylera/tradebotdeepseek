@@ -25,6 +25,7 @@ def make_settings(**overrides) -> SimpleNamespace:
         "live": False,
         "bankroll": 200.0,
         "max_bet": 20.0,
+        "book_staleness_seconds": 20.0,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -121,11 +122,115 @@ class GateProximityTests(unittest.TestCase):
         self.assertIsNone(self.bot.diagnostics["best_arb_sum"])
         self.assertIsNone(self.bot.diagnostics["closest_snipe_price"])
 
-    def test_market_without_an_end_date_is_tolerated(self) -> None:
+    def test_market_without_an_end_date_is_tolerated_but_not_counted(self) -> None:
+        # No ttl means the time gate cannot pass, so it is not "in the band"
+        # even though the price qualifies.
         self.bot._record_gate_proximity(market(None), book(0.92, 0.93), book(0.06, 0.07))
-        self.assertEqual(self.bot.diagnostics["markets_in_snipe_band"], 1)
+        self.assertEqual(self.bot.diagnostics["markets_in_snipe_band"], 0)
         self.assertIsNone(self.bot.diagnostics["closest_ttl_hours"])
+
+    def test_a_price_in_band_but_far_from_resolution_is_not_counted(self) -> None:
+        # This is the false positive that made a quiet bot look broken: 1 cent
+        # from the band, 66 days from resolution, reported as "in band".
+        self.bot._record_gate_proximity(
+            market(datetime.now(timezone.utc) + timedelta(days=66)),
+            book(0.92, 0.93),
+            book(0.06, 0.07),
+        )
+        self.assertEqual(self.bot.diagnostics["markets_in_snipe_band"], 0)
+
+    def test_an_overdue_market_inside_the_window_counts(self) -> None:
+        self.bot._record_gate_proximity(
+            market(datetime.now(timezone.utc) - timedelta(hours=6)),
+            book(0.92, 0.93),
+            book(0.06, 0.07),
+        )
+        self.assertEqual(self.bot.diagnostics["markets_in_snipe_band"], 1)
+
+    def test_a_market_beyond_the_overdue_window_does_not_count(self) -> None:
+        self.bot._record_gate_proximity(
+            market(datetime.now(timezone.utc) - timedelta(hours=30)),
+            book(0.92, 0.93),
+            book(0.06, 0.07),
+        )
+        self.assertEqual(self.bot.diagnostics["markets_in_snipe_band"], 0)
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OneSidedBookPipelineTests(unittest.TestCase):
+    """A market whose book has only one side must still be evaluated.
+
+    Regression guard for the bug that silently emptied the snipe lane: the book
+    cache and fetch path required a two-way quote, so every near-resolution
+    market (one side empty by construction) was dropped before any strategy saw
+    it. `markets_evaluated` stayed at 12 of 20 and `signals_total` at 0.
+    """
+
+    def setUp(self) -> None:
+        import asyncio
+
+        self.asyncio = asyncio
+
+    def test_a_book_with_only_asks_is_returned(self) -> None:
+        class Scanner:
+            async def get_orderbook(self, token_id):
+                return OrderBook.from_raw(token_id, [], [(0.93, 100.0)])
+
+        bot = TradingBot(
+            settings=make_settings(book_staleness_seconds=20.0),
+            scanner=Scanner(),
+            ledger=SimpleNamespace(),
+            strategy=StrategyEngine(min_ev=0.01, snipe_min_ask=0.90),
+            risk=SimpleNamespace(),
+            model=SimpleNamespace(loaded=False),
+            executor=SimpleNamespace(),
+        )
+        book = self.asyncio.run(bot._get_book("token"))
+        assert book is not None
+        self.assertAlmostEqual(book.best_ask, 0.93)
+        self.assertIsNone(book.best_bid)
+
+    def test_an_empty_book_is_still_refused(self) -> None:
+        class Scanner:
+            async def get_orderbook(self, token_id):
+                return OrderBook.from_raw(token_id, [], [])
+
+        bot = TradingBot(
+            settings=make_settings(book_staleness_seconds=20.0),
+            scanner=Scanner(),
+            ledger=SimpleNamespace(),
+            strategy=StrategyEngine(),
+            risk=SimpleNamespace(),
+            model=SimpleNamespace(loaded=False),
+            executor=SimpleNamespace(),
+        )
+        self.assertIsNone(self.asyncio.run(bot._get_book("token")))
+
+    def test_a_one_sided_market_can_produce_a_signal(self) -> None:
+        # End to end through the strategies, without a network.
+        bot = TradingBot(
+            settings=make_settings(),
+            scanner=SimpleNamespace(),
+            ledger=SimpleNamespace(),
+            strategy=StrategyEngine(min_ev=0.01, snipe_min_ask=0.90, snipe_max_ask=0.97),
+            risk=SimpleNamespace(),
+            model=SimpleNamespace(loaded=False),
+            executor=SimpleNamespace(),
+        )
+        soon = datetime.now(timezone.utc) + timedelta(minutes=30)
+        yes_book = OrderBook.from_raw("yes", [], [(0.905, 100.0)])
+        no_book = OrderBook.from_raw("no", [(0.08, 100.0)], [])
+        bot._record_gate_proximity(market(soon), yes_book, no_book)
+        self.assertEqual(bot.diagnostics["markets_in_snipe_band"], 1)
+        signals = bot.strategy.check_snipe(market(soon), yes_book, no_book)
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].token_id, "yes")
+
+
+class BookAccountingTests(unittest.TestCase):
+    def test_markets_without_a_book_are_counted(self) -> None:
+        bot = make_bot()
+        self.assertEqual(bot.diagnostics["markets_without_book"], 0)

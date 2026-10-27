@@ -80,6 +80,9 @@ class TradingBot:
         self.model_info: dict[str, Any] = {}
         # What the SNIPE hold assumption is actually based on (or not).
         self.evidence: dict[str, Any] = {}
+        # Round-robin cursor for the NegRisk lane: the per-cycle event budget is
+        # small (free host), so coverage has to rotate rather than starve.
+        self._negrisk_cursor = 0
         # Published on /healthz so "no signals" can be explained per cycle
         # instead of guessed at from a token-protected table.
         self.diagnostics: dict[str, Any] = {
@@ -380,7 +383,15 @@ class TradingBot:
 
         generated = 0
         checked = 0
-        for event_id in list(groups)[:max_events]:
+        # Rotate the window across cycles. With more groups than budget, a fixed
+        # first-N window would price the same events forever and never look at
+        # the rest.
+        ordered = list(groups)
+        start = self._negrisk_cursor % len(ordered)
+        budget = min(max_events, len(ordered))
+        window = [ordered[(start + offset) % len(ordered)] for offset in range(budget)]
+        self._negrisk_cursor = (start + budget) % len(ordered)
+        for event_id in window:
             try:
                 title, outcomes = await self.scanner.fetch_event_outcomes(event_id)
             except Exception:

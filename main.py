@@ -84,6 +84,7 @@ class TradingBot:
         self.diagnostics: dict[str, Any] = {
             "near_resolution_candidates": 0,
             "near_resolution_selected": 0,
+            "markets_without_book": 0,
             "markets_in_snipe_band": 0,
             "closest_snipe_price": None,
             "best_arb_sum": None,
@@ -244,6 +245,7 @@ class TradingBot:
         self.diagnostics["closest_snipe_price"] = None
         self.diagnostics["best_arb_sum"] = None
         self.diagnostics["closest_ttl_hours"] = None
+        self.diagnostics["markets_without_book"] = 0
         self.stream.set_assets(
             token for market in markets for token in (market.token_yes, market.token_no)
         )
@@ -264,6 +266,10 @@ class TradingBot:
                 continue
             yes_book, no_book = result
             if yes_book is None or no_book is None:
+                # Counted, not silently skipped: a market with no usable book is
+                # the difference between "nothing qualified" and "nothing was
+                # even looked at".
+                self.diagnostics["markets_without_book"] += 1
                 continue
 
             evaluated += 1
@@ -361,12 +367,21 @@ class TradingBot:
             if closest is None or abs(hours) < abs(closest):
                 self.diagnostics["closest_ttl_hours"] = hours
 
-        low, high = strategy.snipe_band()
+        low, high = strategy.snipe_band(market.fee_rate)
         candidates = [price for price in (yes_ask, no_ask) if price is not None]
         if not candidates:
             return
+        # Both gates, not just price: a market 66 days from resolution sitting
+        # in the price band is not "in the snipe band", it is a false positive
+        # that made a quiet bot look broken.
+        ttl_days = market.ttl_days()
+        time_ok = (
+            ttl_days is not None
+            and ttl_days < strategy.snipe_max_ttl_days
+            and ttl_days >= -strategy.snipe_overdue_hours / 24.0
+        )
         in_band = [price for price in candidates if low <= float(price) < high]
-        if in_band:
+        if in_band and time_ok:
             self.diagnostics["markets_in_snipe_band"] += 1
         # Distance from the tradeable band, so "how close were we?" is answerable.
         nearest = min(
@@ -386,6 +401,11 @@ class TradingBot:
     def _model_signal(
         self, market: Market, yes_book: OrderBook, no_book: OrderBook
     ) -> Signal | None:
+        # The model was trained on two-way books. On a one-sided book mid_price
+        # falls back to the last trade, which for a near-resolution market can be
+        # 0.001 -- feeding that in would produce confident nonsense.
+        if yes_book.best_bid is None or yes_book.best_ask is None:
+            return None
         market_probability = yes_book.mid_price
         if market_probability is None or not 0.0 < market_probability < 1.0:
             return None
@@ -625,7 +645,7 @@ class TradingBot:
         if cached is not None:
             updated_at, book = cached
             age = time.monotonic() - updated_at
-            if age <= self.settings.book_staleness_seconds and book.is_tradable():
+            if age <= self.settings.book_staleness_seconds and book.has_liquidity:
                 return book
 
         async with self._book_semaphore:
@@ -634,7 +654,7 @@ class TradingBot:
             except Exception as exc:  # noqa: BLE001 - one fetch must not stop the cycle
                 logger.warning("Order book fetch failed for %s: %s", token_id[:12], exc)
                 return None
-        if not book.is_tradable():
+        if not book.has_liquidity:
             return None
         self._books[token_id] = (time.monotonic(), book)
         return book
@@ -646,7 +666,7 @@ class TradingBot:
         asks: list[tuple[float, float]],
     ) -> None:
         book = OrderBook.from_raw(asset_id, bids, asks)
-        if book.is_tradable():
+        if book.has_liquidity:
             self._books[asset_id] = (time.monotonic(), book)
 
     async def _wait_or_stop(self, seconds: float) -> None:

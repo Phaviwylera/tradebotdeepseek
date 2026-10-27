@@ -354,3 +354,79 @@ class FeeParsingTests(unittest.TestCase):
         market = self.parse(raw_market())
         assert market is not None
         self.assertGreater(market.fee_rate, 0.0)
+
+
+class OneSidedBookTests(unittest.TestCase):
+    """A market about to resolve has one side empty -- and it is still tradeable.
+
+    Live example (Polymarket, 2026-10-27): a market closing that day quoted YES
+    asks from 0.001 to 0.999 with **no bids at all**, and NO bids with no asks.
+    Requiring a two-way book discarded every such market, which is exactly the
+    set the snipe strategy is meant to trade.
+    """
+
+    def test_no_bids_is_still_readable(self) -> None:
+        book = OrderBook.from_raw("token", [], [("0.93", 100), ("0.99", 50)])
+        self.assertIsNone(book.best_bid)
+        self.assertEqual(book.best_ask, 0.93)
+        self.assertFalse(book.is_tradable())  # not two-way...
+        self.assertTrue(book.has_liquidity)  # ...but usable
+
+    def test_no_asks_is_still_readable(self) -> None:
+        book = OrderBook.from_raw("token", [("0.93", 100)], [])
+        self.assertEqual(book.best_bid, 0.93)
+        self.assertIsNone(book.best_ask)
+        self.assertFalse(book.is_tradable())
+        self.assertTrue(book.has_liquidity)
+
+    def test_a_completely_empty_book_is_not_usable(self) -> None:
+        book = OrderBook.from_raw("token", [], [])
+        self.assertFalse(book.has_liquidity)
+        self.assertFalse(book.is_tradable())
+
+    def test_levels_are_still_sorted_with_one_side(self) -> None:
+        book = OrderBook.from_raw("token", [], [("0.999", 1), ("0.93", 99), ("0.9", 70)])
+        self.assertEqual(book.best_ask, 0.9)
+        self.assertEqual([level.price for level in book.asks], [0.9, 0.93, 0.999])
+
+
+class NearLaneOrderingTests(unittest.TestCase):
+    """Reserved slots must go to markets that can still be priced.
+
+    Sorting the near lane by raw ttl put the *most* overdue market first (its
+    ttl is the most negative). Those books are usually dead, so all eight
+    reserved slots could be spent before a market closing in 20 minutes was
+    ever fetched.
+    """
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
+
+    def test_imminent_beats_overdue(self) -> None:
+        near = [
+            market("0xdead", self.now - timedelta(hours=23)),  # most negative ttl
+            market("0xsoon", self.now + timedelta(minutes=20)),
+        ]
+        chosen = select_markets([], near, max_total=1, near_slots=1, now=self.now)
+        self.assertEqual([m.condition_id for m in chosen], ["0xsoon"])
+
+    def test_overdue_markets_are_ordered_by_least_late(self) -> None:
+        near = [
+            market("0xlate", self.now - timedelta(hours=20)),
+            market("0xfresh", self.now - timedelta(hours=1)),
+        ]
+        chosen = select_markets([], near, max_total=2, near_slots=2, now=self.now)
+        self.assertEqual([m.condition_id for m in chosen], ["0xfresh", "0xlate"])
+
+    def test_full_priority_order(self) -> None:
+        near = [
+            market("0xnone", None),
+            market("0xoverdue", self.now - timedelta(hours=5)),
+            market("0xlater", self.now + timedelta(hours=4)),
+            market("0xsoon", self.now + timedelta(minutes=10)),
+        ]
+        chosen = select_markets([], near, max_total=4, near_slots=4, now=self.now)
+        self.assertEqual(
+            [m.condition_id for m in chosen],
+            ["0xsoon", "0xlater", "0xoverdue", "0xnone"],
+        )

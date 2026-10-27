@@ -219,6 +219,7 @@ def build_status(ledger_path: Path, limit: int = DEFAULT_LIMIT) -> dict[str, Any
 DIAGNOSTIC_KEYS = (
     "near_resolution_candidates",
     "near_resolution_selected",
+    "markets_without_book",
     "markets_in_snipe_band",
     "closest_snipe_price",
     "best_arb_sum",

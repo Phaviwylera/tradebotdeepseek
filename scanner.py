@@ -132,7 +132,21 @@ class OrderBook:
         return sum(level.size for level in book[:levels])
 
     def is_tradable(self) -> bool:
+        """Both sides quoted: the price is a two-way market."""
         return self.best_bid is not None and self.best_ask is not None
+
+    @property
+    def has_liquidity(self) -> bool:
+        """At least one side is quoted, so the book can still be acted on.
+
+        This is deliberately weaker than ``is_tradable``. As a market nears
+        resolution one side empties: bidders disappear from the near-certain
+        outcome, and market makers pull their asks. Requiring two-way prices
+        therefore discarded *exactly* the markets the snipe strategy targets --
+        live example: a market with asks from 0.001 to 0.999 and no bids at all
+        was dropped as "not tradable" even though its best ask was readable.
+        """
+        return bool(self.bids) or bool(self.asks)
 
 
 def _optional_float(value: Any) -> float | None:
@@ -456,8 +470,24 @@ def select_markets(
         value = market.ttl_days(current)
         return float("inf") if value is None else value
 
+    def near_priority(market: Market) -> tuple[int, float]:
+        """Imminent first, then the least overdue.
+
+        Sorting by raw ttl put the *most* overdue markets first, because their
+        ttl is the most negative. Those are exactly the ones whose books have
+        gone one-sided or dead, so every reserved slot was spent on markets that
+        could no longer be priced -- while the market closing in 20 minutes was
+        never fetched.
+        """
+        value = ttl(market)
+        if value == float("inf"):
+            return (2, 0.0)
+        if value >= 0:
+            return (0, value)
+        return (1, -value)  # overdue: smaller absolute lateness first
+
     budget_near = max(0, min(near_slots, max_total))
-    for market in sorted(near_lane, key=ttl):
+    for market in sorted(near_lane, key=near_priority):
         if len(chosen) >= budget_near:
             break
         if market.condition_id in seen:

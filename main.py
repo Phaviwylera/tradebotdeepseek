@@ -383,14 +383,21 @@ class TradingBot:
         in_band = [price for price in candidates if low <= float(price) < high]
         if in_band and time_ok:
             self.diagnostics["markets_in_snipe_band"] += 1
-        # Distance from the tradeable band, so "how close were we?" is answerable.
-        nearest = min(
-            candidates,
-            key=lambda price: 0.0
-            if low <= float(price) < high
-            else min(abs(float(price) - low), abs(float(price) - high)),
-        )
-        distance = abs(float(nearest) - (low if float(nearest) < low else high))
+
+        def band_distance(price: float) -> float:
+            """0 inside the tradeable band, otherwise the gap to the nearest edge.
+
+            Reporting a non-zero distance for a price that *is* inside the band
+            made /healthz look self-contradictory: "nearest ask 0.93, distance
+            0.0106" next to a band of [0.9000, 0.9406).
+            """
+            value = float(price)
+            if low <= value < high:
+                return 0.0
+            return min(abs(value - low), abs(value - high))
+
+        nearest = min(candidates, key=band_distance)
+        distance = band_distance(nearest)
         previous = self.diagnostics.get("closest_snipe_price")
         if previous is None or distance < previous.get("distance", float("inf")):
             self.diagnostics["closest_snipe_price"] = {

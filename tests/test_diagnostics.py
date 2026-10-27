@@ -88,13 +88,28 @@ class GateProximityTests(unittest.TestCase):
     def test_records_the_closest_ask_and_its_distance(self) -> None:
         self.bot._record_gate_proximity(
             market(datetime.now(timezone.utc) + timedelta(hours=1)),
-            book(0.9000, 0.9100),
-            book(0.0800, 0.0900),
+            book(0.8600, 0.8700),
+            book(0.1200, 0.1300),
         )
         closest = self.bot.diagnostics["closest_snipe_price"]
         assert closest is not None
-        self.assertEqual(closest["ask"], 0.91)
-        self.assertAlmostEqual(closest["distance"], 0.02, places=6)
+        self.assertEqual(closest["ask"], 0.87)
+        # Default band floor is 0.93, so 0.87 is six cents below it.
+        self.assertAlmostEqual(closest["distance"], 0.06, places=6)
+
+    def test_a_price_inside_the_band_reports_zero_distance(self) -> None:
+        # /healthz used to print "nearest ask 0.93, distance 0.0106" beside a
+        # band of [0.9000, 0.9406): a price inside its own band, apparently
+        # outside it.
+        self.bot._record_gate_proximity(
+            market(datetime.now(timezone.utc) + timedelta(hours=1)),
+            book(0.9200, 0.9300),
+            book(0.0600, 0.0700),
+        )
+        closest = self.bot.diagnostics["closest_snipe_price"]
+        assert closest is not None
+        self.assertEqual(closest["ask"], 0.93)
+        self.assertEqual(closest["distance"], 0.0)
 
     def test_keeps_the_best_arb_sum_of_the_cycle(self) -> None:
         soon = datetime.now(timezone.utc) + timedelta(hours=1)

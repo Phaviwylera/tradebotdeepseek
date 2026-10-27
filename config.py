@@ -64,6 +64,7 @@ class Settings:
     model_path: Path
     model_url: str
     snapshot_path: Path | None
+    evidence_path: Path | None
     log_level: str
 
     scan_interval_seconds: int
@@ -121,6 +122,9 @@ class Settings:
             ledger_path=Path(os.getenv("LEDGER_PATH", "ledger.db")),
             model_path=Path(os.getenv("MODEL_PATH", "model.joblib")),
             model_url=os.getenv("MODEL_URL", "").strip(),
+            evidence_path=Path(evidence_path)
+            if (evidence_path := os.getenv("EVIDENCE_PATH", "").strip())
+            else None,
             snapshot_path=Path(snapshot_path)
             if (snapshot_path := os.getenv("SNAPSHOT_PATH", "").strip())
             else None,
@@ -183,6 +187,7 @@ class Settings:
             "model_path": str(self.model_path),
             "model_url_configured": bool(self.model_url),
             "snapshot_path": str(self.snapshot_path) if self.snapshot_path else None,
+            "evidence_path": str(self.evidence_path) if self.evidence_path else None,
             "near_resolution_slots": self.near_resolution_slots,
             "min_ev": self.min_ev,
             "snipe_band": [self.snipe_min_ask, self.snipe_max_ask],

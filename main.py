@@ -21,6 +21,7 @@ from typing import Any
 
 import web
 from config import Settings
+from evidence import EvidenceGate, load_evidence
 from executor import ExecutionResult, OrderExecutor
 from features import build_features
 from ledger import Ledger
@@ -76,6 +77,8 @@ class TradingBot:
         self._shutdown_done = False
         self._status_server: web.StatusHTTPServer | None = None
         self.model_info: dict[str, Any] = {}
+        # What the SNIPE hold assumption is actually based on (or not).
+        self.evidence: dict[str, Any] = {}
         # Published on /healthz so "no signals" can be explained per cycle
         # instead of guessed at from a token-protected table.
         self.diagnostics: dict[str, Any] = {
@@ -88,8 +91,10 @@ class TradingBot:
             # Published so the console can quote the *live* band instead of a
             # number baked into the page.
             "snipe_band": None,
+            "snipe_band_5pct": None,
             "min_ev": None,
             "arb_threshold": None,
+            "effective_hold": None,
         }
         self.snapshots = SnapshotRecorder(getattr(settings, "snapshot_path", None))
         self._status_thread: threading.Thread | None = None
@@ -114,9 +119,12 @@ class TradingBot:
         # Without this, an idle console looks like a fault. The gates explain a
         # quiet bot: both remaining strategies are deliberately rare.
         low, high = self.strategy.snipe_band()
+        low_fee, high_fee = self.strategy.snipe_band(0.05)
         self.diagnostics["snipe_band"] = {"min": round(low, 4), "max": round(high, 4)}
+        self.diagnostics["snipe_band_5pct"] = {"min": round(low_fee, 4), "max": round(high_fee, 4)}
         self.diagnostics["min_ev"] = self.strategy.min_ev
         self.diagnostics["arb_threshold"] = self.strategy.arb_threshold
+        self.diagnostics["effective_hold"] = round(self.strategy.effective_hold, 6)
         logger.info("Signal gates: %s", self.strategy.describe_gates())
         if self.snapshots.enabled:
             logger.info(
@@ -201,6 +209,7 @@ class TradingBot:
                 serve_dashboard=self.settings.serve_dashboard,
                 model_info=self.model_info,
                 diagnostics=self.diagnostics,
+                evidence=self.evidence,
             )
         except OSError:
             # A busy port must never stop the trading loop.
@@ -744,6 +753,12 @@ async def async_main() -> None:
         near_window_hours=settings.near_resolution_window_hours,
         near_overdue_hours=settings.near_resolution_overdue_hours,
     )
+    evidence_gate = EvidenceGate(load_evidence(getattr(settings, "evidence_path", None)))
+    measured = evidence_gate.measured
+    if measured is not None:
+        logger.info(
+            "Measured hold evidence: %s", evidence_gate.describe(settings.snipe_hold_probability)
+        )
     strategy = StrategyEngine(
         min_ev=settings.min_ev,
         max_bet=settings.max_bet,
@@ -753,6 +768,8 @@ async def async_main() -> None:
         snipe_max_ask=settings.snipe_max_ask,
         snipe_hold_probability=settings.snipe_hold_probability,
         snipe_max_ttl_days=settings.snipe_max_ttl_hours / 24.0,
+        measured_hold=measured.ci_low if measured is not None else None,
+        measured_hold_source=evidence_gate.report.source if measured is not None else "",
     )
     risk = RiskManager(
         bankroll=settings.bankroll,
@@ -776,6 +793,7 @@ async def async_main() -> None:
         executor=executor,
     )
     bot.model_info = model_info
+    bot.evidence = evidence_gate.as_summary(settings.snipe_hold_probability)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

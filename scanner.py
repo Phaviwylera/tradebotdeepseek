@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from fees import from_gamma
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +56,15 @@ class Market:
     volume: float
     liquidity: float
     end_date: datetime | None
+    # Taker fee this market charges (Gamma's feeSchedule). Needed because a
+    # 1-cent edge at 0.94 is 28% fee at the sports rate.
+    fee_rate: float = 0.0
+    fee_exponent: int = 1
+
+    def fee_per_share(self, price: float) -> float:
+        from fees import FeeSchedule
+
+        return FeeSchedule(rate=self.fee_rate, exponent=self.fee_exponent).per_share(price)
 
     def ttl_days(self, now: datetime | None = None) -> float | None:
         if self.end_date is None:
@@ -407,6 +418,7 @@ class MarketScanner:
         )
         question = str(raw.get("question") or raw.get("title") or condition_id)
 
+        schedule = from_gamma(raw)
         return Market(
             condition_id=condition_id,
             question=question,
@@ -415,6 +427,8 @@ class MarketScanner:
             volume=volume,
             liquidity=liquidity,
             end_date=end_date,
+            fee_rate=schedule.effective_rate,
+            fee_exponent=schedule.exponent,
         )
 
 

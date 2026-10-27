@@ -181,6 +181,56 @@ arbitrage and sniping only.
 
 ---
 
+## Fees, and why the gates had to change
+
+Polymarket charges taker fees: `fee = shares × rate × p × (1 − p)`, with the
+rate varying by category (sports 0.05, crypto 0.07, politics/tech/finance 0.04,
+geopolitics free). Gamma reports the parameters on every market as
+`feeSchedule`.
+
+This matters enormously at the prices this bot trades. At an ask of 0.94 with a
+5% fee, the fee is **0.00282 a share against a 0.010 edge — 28% of the trade**.
+The gates originally priced edge as `(hold − ask) / ask`, so they were blind to
+it:
+
+| ask 0.94, hold 0.95 | no fee | 5% taker fee |
+|---|---|---|
+| edge per share | 0.01000 | 0.00718 |
+| return on capital | +1.06% | **+0.76%** |
+
+With a 1% EV gate that trade should never have fired; it did, because the fee
+was free. And at the original defaults the band was *empty*: the fee-aware cap
+is `0.9281` at `MIN_EV=0.02`, below the `0.93` floor.
+
+Now:
+
+- `Market` carries the real `fee_rate`, and a market with no fee block is
+  assumed to charge the sports rate rather than being treated as free.
+- `check_snipe` charges the fee and its cap is fee-dependent
+  (`[0.9000, 0.9377)` at `MIN_EV=0.01` with a 5% fee).
+- `check_arbitrage` only takes a pair that clears 1.000 **after** both legs: at
+  0.4925/0.4925 the old 0.985 threshold approved a pair costing **1.0096**.
+
+## Measuring the assumption (the research loop)
+
+Every snipe signal rests on one number that was never measured: the probability
+that a market priced ~0.93 resolves YES. `docs/STRATEGY_RESEARCH.md` describes
+the loop, and `scripts/strategy_lab.py` runs it:
+
+```bash
+python scripts/strategy_lab.py --markets 200 --lead-hours 2 \
+    --min-ask 0.90 --max-ask 0.94 --out evidence/study.json
+```
+
+It reports a calibration table with Wilson intervals, charges the venue's fee,
+corrects for the number of buckets tested, and returns `ACCEPT` / `REVISE` /
+`REJECT` / `INSUFFICIENT`. `EVIDENCE_PATH` points the bot at the result, which
+can only make the hold assumption *more* conservative:
+
+```json
+"evidence": {"source": "measured", "effective_hold": 0.884, "n": 214, "verdict": "REJECT"}
+```
+
 ## Architecture
 
 ```text
@@ -288,6 +338,7 @@ network, no account. The console is also deployed publicly from
 | `NEAR_RESOLUTION_WINDOW_HOURS` | `6` | How far ahead the near-resolution lane looks. |
 | `NEAR_RESOLUTION_OVERDUE_HOURS` | `24` | How far *past* `endDate` the lane still includes (in-play markets). |
 | `SNIPE_OVERDUE_HOURS` | `24` | How late a market may be and still be snipeable. `0` requires `ttl >= 0`. |
+| `EVIDENCE_PATH` | *(empty)* | Measured hold evidence from `scripts/strategy_lab.py`. Can only lower the hold assumption. |
 | `SCAN_INTERVAL_SECONDS` | `60` | Pipeline cadence. |
 | `MAX_MARKETS_PER_CYCLE` | `40` | Book/strategy working set. |
 | `SIGNAL_COOLDOWN_SECONDS` | `3600` | Per-market/strategy dedupe window. |

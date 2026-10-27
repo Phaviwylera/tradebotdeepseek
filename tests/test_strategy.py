@@ -7,7 +7,7 @@ from scanner import Market, OrderBook
 from strategy import StrategyEngine
 
 
-def make_market(end_date: datetime | None = None) -> Market:
+def make_market(end_date: datetime | None = None, fee_rate: float = 0.0) -> Market:
     return Market(
         condition_id="0xcondition",
         question="Will the test resolve YES?",
@@ -16,6 +16,7 @@ def make_market(end_date: datetime | None = None) -> Market:
         volume=50_000.0,
         liquidity=10_000.0,
         end_date=end_date or datetime.now(timezone.utc) + timedelta(days=10),
+        fee_rate=fee_rate,
     )
 
 
@@ -276,7 +277,96 @@ class ConfigurableGateTests(unittest.TestCase):
     def test_arb_threshold_is_configurable(self) -> None:
         strict = StrategyEngine(arb_threshold=0.985)
         loose = StrategyEngine(arb_threshold=1.002)
-        yes_book = make_book("yes-token", 0.4900, 0.5000)
-        no_book = make_book("no-token", 0.4900, 0.5000)
+        # 0.490 + 0.495 = 0.985: a real 1.5-cent arbitrage, refused by the
+        # 0.985 margin but accepted by a looser 1.002 one.
+        yes_book = make_book("yes-token", 0.4850, 0.4900)
+        no_book = make_book("no-token", 0.4900, 0.4950)
         self.assertEqual(len(strict.check_arbitrage(self.market, yes_book, no_book)), 0)
         self.assertEqual(len(loose.check_arbitrage(self.market, yes_book, no_book)), 2)
+
+
+class FeeAwareGateTests(unittest.TestCase):
+    """The live bug: a 0.94 snipe looked profitable only because fees were free.
+
+    Polymarket charges `fee = shares x rate x p x (1-p)` on taker fills, so at
+    0.94 with the 5% sports rate the fee is 0.00282 a share against a 1-cent
+    edge -- 28% of the thesis.
+    """
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        self.engine = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+
+    def market(self, fee_rate: float):
+        return make_market(self.now + timedelta(hours=1), fee_rate=fee_rate)
+
+    def test_the_same_trade_is_accepted_fee_free_and_refused_with_a_fee(self) -> None:
+        yes_book = make_book("yes-token", 0.9300, 0.9400)
+        no_book = make_book("no-token", 0.0500, 0.0600)
+        self.assertEqual(
+            len(self.engine.check_snipe(self.market(0.0), yes_book, no_book, now=self.now)), 1
+        )
+        self.assertEqual(
+            len(self.engine.check_snipe(self.market(0.05), yes_book, no_book, now=self.now)), 0
+        )
+
+    def test_a_cheap_market_survives_the_same_fee(self) -> None:
+        # At 0.90 the edge is 5 cents and the fee is 0.45 cents: it still pays.
+        yes_book = make_book("yes-token", 0.8900, 0.9000)
+        no_book = make_book("no-token", 0.0900, 0.1000)
+        signals = self.engine.check_snipe(self.market(0.05), yes_book, no_book, now=self.now)
+        self.assertEqual(len(signals), 1)
+        self.assertIn("fee=0.0045", signals[0].reason)
+
+    def test_the_band_cap_moves_with_the_fee(self) -> None:
+        fee_free = self.engine.snipe_band(0.0)[1]
+        sports = self.engine.snipe_band(0.05)[1]
+        self.assertAlmostEqual(fee_free, 0.9406, places=4)
+        self.assertAlmostEqual(sports, 0.9377, places=4)
+        self.assertLess(sports, fee_free)
+
+    def test_arbitrage_requires_a_real_post_fee_discount(self) -> None:
+        # 0.4925 + 0.4925 = 0.985 cleared the old price-only threshold, but the
+        # pair costs 1.0096 once both legs are charged.
+        balanced_yes = make_book("yes-token", 0.4800, 0.4900)
+        balanced_no = make_book("no-token", 0.4800, 0.4900)
+        self.assertEqual(
+            len(self.engine.check_arbitrage(self.market(0.05), balanced_yes, balanced_no)), 0
+        )
+        self.assertEqual(
+            len(self.engine.check_arbitrage(self.market(0.0), balanced_yes, balanced_no)), 2
+        )
+
+    def test_a_deep_discount_still_arbitrages_with_fees(self) -> None:
+        yes_book = make_book("yes-token", 0.4400, 0.4500)
+        no_book = make_book("no-token", 0.4400, 0.4500)
+        self.assertEqual(len(self.engine.check_arbitrage(self.market(0.05), yes_book, no_book)), 2)
+
+
+class MeasuredHoldTests(unittest.TestCase):
+    """Evidence may only make the strategy more conservative."""
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        self.market = make_market(self.now + timedelta(hours=1))
+
+    def test_measured_hold_replaces_the_assumption(self) -> None:
+        engine = StrategyEngine(min_ev=0.01, measured_hold=0.92, measured_hold_source="lab")
+        self.assertAlmostEqual(engine.effective_hold, 0.92)
+        self.assertIn("0.9200", engine.describe_gates())
+        self.assertIn("lab", engine.describe_gates())
+
+    def test_measured_hold_lowers_the_band_cap(self) -> None:
+        assumed = StrategyEngine(min_ev=0.01, snipe_hold_probability=0.95)
+        measured = StrategyEngine(min_ev=0.01, snipe_hold_probability=0.95, measured_hold=0.92)
+        self.assertLess(measured.snipe_band(0.0)[1], assumed.snipe_band(0.0)[1])
+
+    def test_a_good_measurement_cannot_raise_the_assumption(self) -> None:
+        engine = StrategyEngine(snipe_hold_probability=0.90, measured_hold=0.99)
+        self.assertAlmostEqual(engine.effective_hold, 0.90)
+
+    def test_bad_measured_values_are_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            StrategyEngine(measured_hold=0.0)
+        with self.assertRaises(ValueError):
+            StrategyEngine(measured_hold=1.4)

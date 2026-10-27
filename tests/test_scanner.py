@@ -317,3 +317,40 @@ class SelectMarketsTests(unittest.TestCase):
         ]
         chosen = select_markets(self.volume_lane, near, max_total=2, near_slots=2, now=self.now)
         self.assertEqual([m.condition_id for m in chosen], ["0xsoon", "0xnone"])
+
+
+class FeeParsingTests(unittest.TestCase):
+    """Gamma's feeSchedule has to survive parsing, or the EV gate is blind."""
+
+    def setUp(self) -> None:
+        self.scanner = MarketScanner("https://gamma.invalid", "https://clob.invalid")
+
+    def parse(self, payload):
+        return self.scanner._parse_market(payload)
+
+    def test_sports_fee_is_attached_to_the_market(self) -> None:
+        market = self.parse(
+            raw_market(
+                feesEnabled=True,
+                feeType="sports_fees_v3",
+                feeSchedule={"exponent": 1, "rate": 0.05, "takerOnly": True, "rebateRate": 0.15},
+            )
+        )
+        assert market is not None
+        self.assertAlmostEqual(market.fee_rate, 0.05)
+        self.assertAlmostEqual(market.fee_per_share(0.94), 0.05 * 0.94 * 0.06, places=9)
+
+    def test_fee_free_markets_carry_a_zero_rate(self) -> None:
+        market = self.parse(
+            raw_market(
+                feesEnabled=True, feeType="zero_fees", feeSchedule={"rate": 0, "exponent": 1}
+            )
+        )
+        assert market is not None
+        self.assertEqual(market.fee_rate, 0.0)
+        self.assertEqual(market.fee_per_share(0.5), 0.0)
+
+    def test_a_market_without_a_fee_block_assumes_the_conservative_rate(self) -> None:
+        market = self.parse(raw_market())
+        assert market is not None
+        self.assertGreater(market.fee_rate, 0.0)

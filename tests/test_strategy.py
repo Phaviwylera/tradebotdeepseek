@@ -162,6 +162,36 @@ class ModelEdgeTests(unittest.TestCase):
         self.assertAlmostEqual(signal.size_usd, 12.50)
         self.assertLessEqual(signal.size_usd, 20.0)
 
+    def test_kelly_fraction_scales_the_stake(self) -> None:
+        # Half-Kelly on the same edge stakes exactly twice as much, until the
+        # max_bet cap bites.
+        book_yes, book_no = make_book("yes-token", 0.58, 0.60), make_book("no-token", 0.39, 0.41)
+        quarter = StrategyEngine(min_ev=0.02, max_bet=100.0).check_model_edge(
+            make_market(), book_yes, book_no, anchored_prob=0.70, bankroll=200.0
+        )
+        half = StrategyEngine(min_ev=0.02, max_bet=100.0, kelly_fraction=0.5).check_model_edge(
+            make_market(), book_yes, book_no, anchored_prob=0.70, bankroll=200.0
+        )
+        assert quarter is not None and half is not None
+        self.assertAlmostEqual(half.size_usd, quarter.size_usd * 2.0)
+
+    def test_full_kelly_is_still_capped_by_max_bet(self) -> None:
+        engine = StrategyEngine(min_ev=0.02, max_bet=20.0, kelly_fraction=1.0)
+        signal = engine.check_model_edge(
+            make_market(),
+            make_book("yes-token", 0.58, 0.60),
+            make_book("no-token", 0.39, 0.41),
+            anchored_prob=0.70,
+            bankroll=200.0,
+        )
+        assert signal is not None
+        self.assertLessEqual(signal.size_usd, 20.0)
+
+    def test_invalid_kelly_fraction_is_rejected(self) -> None:
+        for bad in (0.0, -0.5, 1.5):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                StrategyEngine(min_ev=0.02, max_bet=20.0, kelly_fraction=bad)
+
     def test_model_edge_respects_confidence_floor(self) -> None:
         engine = StrategyEngine(min_ev=0.02, max_bet=20.0)
         signal = engine.check_model_edge(

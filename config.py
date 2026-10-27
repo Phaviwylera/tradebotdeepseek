@@ -87,6 +87,10 @@ class Settings:
     near_resolution_slots: int
     near_resolution_window_hours: float
     near_resolution_overdue_hours: float
+    kelly_fraction: float
+    negrisk_enabled: bool
+    negrisk_max_events: int
+    negrisk_min_profit: float
     signature_type: int
     funder: str
     cancel_on_shutdown: bool
@@ -148,6 +152,10 @@ class Settings:
             near_resolution_slots=_env_int("NEAR_RESOLUTION_SLOTS", 8, minimum=0),
             near_resolution_window_hours=_env_float("NEAR_RESOLUTION_WINDOW_HOURS", 6.0),
             near_resolution_overdue_hours=_env_float("NEAR_RESOLUTION_OVERDUE_HOURS", 24.0),
+            kelly_fraction=_env_float("KELLY_FRACTION", 0.25),
+            negrisk_enabled=_env_bool("NEGRISK_ENABLED", True),
+            negrisk_max_events=_env_int("NEGRISK_MAX_EVENTS", 3, minimum=0),
+            negrisk_min_profit=_env_float("NEGRISK_MIN_PROFIT", 0.005),
             signature_type=signature_type,
             funder=os.getenv("POLYMARKET_FUNDER", "").strip(),
             cancel_on_shutdown=_env_bool("CANCEL_ON_SHUTDOWN", True),
@@ -163,6 +171,12 @@ class Settings:
             raise ValueError("SNIPE_HOLD_PROBABILITY must be in (0, 1]")
         if settings.arb_threshold > 1.0:
             raise ValueError("ARB_THRESHOLD above 1.0 is not arbitrage")
+        # Full Kelly maximises growth and maximises drawdown; fractional Kelly is
+        # the standard defence against an estimated probability being wrong.
+        if not 0.0 < settings.kelly_fraction <= 1.0:
+            raise ValueError("KELLY_FRACTION must be in (0, 1]")
+        if settings.negrisk_min_profit < 0.0:
+            raise ValueError("NEGRISK_MIN_PROFIT cannot be negative")
 
         for name in ("max_daily_loss_pct", "max_drawdown_pct", "max_exposure_pct"):
             value = getattr(settings, name)
@@ -190,6 +204,8 @@ class Settings:
             "evidence_path": str(self.evidence_path) if self.evidence_path else None,
             "near_resolution_slots": self.near_resolution_slots,
             "min_ev": self.min_ev,
+            "kelly_fraction": self.kelly_fraction,
+            "negrisk_events": self.negrisk_max_events,
             "snipe_band": [self.snipe_min_ask, self.snipe_max_ask],
             "near_resolution_window_hours": self.near_resolution_window_hours,
             "scan_interval_seconds": self.scan_interval_seconds,

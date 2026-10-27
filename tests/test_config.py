@@ -123,6 +123,40 @@ class SignalGateSettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build(ARB_THRESHOLD="1.01")
 
+    def test_quarter_kelly_is_the_default_and_is_configurable(self) -> None:
+        self.assertEqual(build().kelly_fraction, 0.25)
+        self.assertEqual(build(KELLY_FRACTION="0.5").kelly_fraction, 0.5)
+
+    def test_kelly_fraction_outside_zero_one_is_rejected(self) -> None:
+        # >1 is over-betting (guaranteed ruin given enough time); 0 never stakes.
+        for value in ("0", "-0.1", "1.5"):
+            with self.assertRaises(ValueError, msg=value):
+                build(KELLY_FRACTION=value)
+
+    def test_negrisk_lane_is_on_by_default(self) -> None:
+        settings = build()
+        self.assertTrue(settings.negrisk_enabled)
+        self.assertEqual(settings.negrisk_max_events, 3)
+        self.assertEqual(settings.negrisk_min_profit, 0.005)
+
+    def test_negrisk_lane_can_be_switched_off(self) -> None:
+        settings = build(NEGRISK_ENABLED="false")
+        self.assertFalse(settings.negrisk_enabled)
+
+    def test_negative_negrisk_profit_floor_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            build(NEGRISK_MIN_PROFIT="-0.01")
+
+    def test_a_disabled_lane_with_no_events_is_allowed(self) -> None:
+        settings = build(NEGRISK_ENABLED="false", NEGRISK_MAX_EVENTS="0")
+        self.assertFalse(settings.negrisk_enabled)
+        self.assertEqual(settings.negrisk_max_events, 0)
+
+    def test_summary_publishes_the_kelly_fraction_and_lane(self) -> None:
+        summary = build().public_summary()
+        self.assertEqual(summary["kelly_fraction"], 0.25)
+        self.assertEqual(summary["negrisk_events"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

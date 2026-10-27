@@ -42,6 +42,7 @@ class StrategyEngine:
         snipe_max_ttl_days: float = SNIPE_MAX_TTL_DAYS,
         measured_hold: float | None = None,
         measured_hold_source: str = "",
+        kelly_fraction: float = 0.25,
     ) -> None:
         if min_ev < 0:
             raise ValueError("min_ev must be non-negative")
@@ -68,6 +69,11 @@ class StrategyEngine:
         if self.measured_hold is not None and not 0.0 < self.measured_hold <= 1.0:
             raise ValueError("measured_hold must be in (0, 1]")
         self.measured_hold_source = measured_hold_source
+        # Fractional Kelly: full Kelly maximises growth *and* drawdown, and the
+        # probability feeding it here is a model output, not a fact.
+        if not 0.0 < kelly_fraction <= 1.0:
+            raise ValueError("kelly_fraction must be in (0, 1]")
+        self.kelly_fraction = float(kelly_fraction)
         self.snipe_max_ttl_days = float(snipe_max_ttl_days)
         # Gamma's endDate is the scheduled close. For a sports market that is the
         # kick-off, so a match that is still being played has a *negative* ttl —
@@ -283,7 +289,7 @@ class StrategyEngine:
             kelly_full = edge / (1.0 - price)
             if kelly_full <= 0.0:
                 continue
-            size_usd = min(self.max_bet, bankroll * 0.25 * kelly_full)
+            size_usd = min(self.max_bet, bankroll * self.kelly_fraction * kelly_full)
             if size_usd < 0.01:
                 continue
 

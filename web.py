@@ -229,6 +229,13 @@ DIAGNOSTIC_KEYS = (
     "min_ev",
     "arb_threshold",
     "effective_hold",
+    # NegRisk basket lane: how many events were looked at and the cheapest
+    # complete basket found. "0 checked" is the honest answer on most cycles,
+    # because only multi-outcome events carry these fields.
+    "negrisk_groups",
+    "negrisk_checked",
+    "negrisk_best_cost",
+    "negrisk_best_profit",
 )
 
 

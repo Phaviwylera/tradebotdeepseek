@@ -356,6 +356,149 @@ class FeeParsingTests(unittest.TestCase):
         self.assertGreater(market.fee_rate, 0.0)
 
 
+class NegRiskParsingTests(unittest.TestCase):
+    """A binary view cannot see a basket, so membership must survive parsing."""
+
+    def setUp(self) -> None:
+        self.scanner = MarketScanner("https://gamma.invalid", "https://clob.invalid")
+
+    def test_negrisk_flags_and_event_id_are_captured(self) -> None:
+        market = self.scanner._parse_market(
+            raw_market(
+                negRisk=True,
+                negRiskMarketID="0xabc",
+                events=[{"id": "32225", "title": "House 2026", "slug": "house-2026"}],
+            )
+        )
+        assert market is not None
+        self.assertTrue(market.neg_risk)
+        self.assertEqual(market.neg_risk_id, "0xabc")
+        self.assertEqual(market.event_id, "32225")
+
+    def test_a_binary_market_is_not_negrisk(self) -> None:
+        market = self.scanner._parse_market(raw_market())
+        assert market is not None
+        self.assertFalse(market.neg_risk)
+        self.assertEqual(market.neg_risk_id, "")
+        self.assertEqual(market.event_id, "")
+
+    def test_negrisk_without_an_event_still_parses(self) -> None:
+        market = self.scanner._parse_market(raw_market(negRisk=True, negRiskMarketID="0xabc"))
+        assert market is not None
+        self.assertTrue(market.neg_risk)
+        self.assertEqual(market.event_id, "")
+
+
+class FetchEventOutcomesTests(unittest.IsolatedAsyncioTestCase):
+    """Basket membership comes from the event, not from /markets filters."""
+
+    def scanner_for(self, payload):
+        scanner = MarketScanner("https://gamma.invalid", "https://clob.invalid")
+
+        async def fake_get_json(http, path, params):
+            self.assertEqual(path, "/events")
+            self.assertIn("id", params)
+            return payload
+
+        scanner._get_json = fake_get_json  # type: ignore[method-assign]
+        return scanner
+
+    async def test_reads_every_member_of_the_event(self) -> None:
+        scanner = self.scanner_for(
+            [
+                {
+                    "id": "32225",
+                    "title": "House 2026",
+                    "markets": [
+                        raw_market(
+                            groupItemTitle="Democrats",
+                            bestAsk=0.30,
+                            negRisk=True,
+                            feeType="zero_fees",
+                            feeSchedule={"rate": 0, "exponent": 1},
+                        ),
+                        raw_market(
+                            groupItemTitle="Republicans",
+                            bestAsk=None,
+                            closed=True,
+                            feeType="zero_fees",
+                            feeSchedule={"rate": 0, "exponent": 1},
+                        ),
+                    ],
+                }
+            ]
+        )
+
+        title, outcomes = await scanner.fetch_event_outcomes("32225")
+
+        self.assertEqual(title, "House 2026")
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual(outcomes[0].label, "Democrats")
+        self.assertAlmostEqual(outcomes[0].best_ask, 0.30)
+        self.assertEqual(outcomes[0].token_yes, "token-yes")
+        self.assertTrue(outcomes[0].tradable)
+        self.assertIsNone(outcomes[1].best_ask)
+        self.assertFalse(outcomes[1].tradable)
+
+    async def test_unwraps_a_data_envelope(self) -> None:
+        scanner = self.scanner_for(
+            {"data": [{"id": "1", "title": "Event", "markets": [raw_market(bestAsk=0.4)]}]}
+        )
+
+        title, outcomes = await scanner.fetch_event_outcomes("1")
+
+        self.assertEqual(title, "Event")
+        self.assertEqual(len(outcomes), 1)
+
+    async def test_empty_event_id_makes_no_request(self) -> None:
+        scanner = self.scanner_for([{"title": "should not be used", "markets": []}])
+
+        self.assertEqual(await scanner.fetch_event_outcomes(""), ("", []))
+
+    async def test_a_response_for_another_event_is_refused(self) -> None:
+        # The filter-ignored case: Gamma returns a list that does not contain the
+        # requested id. Pricing payload[0] here would invent a basket.
+        scanner = self.scanner_for(
+            [{"id": "999", "title": "wrong", "markets": [raw_market(bestAsk=0.1)]}]
+        )
+
+        with self.assertLogs("scanner", level="WARNING"):
+            self.assertEqual(await scanner.fetch_event_outcomes("32225"), ("", []))
+
+    async def test_the_matching_event_is_selected_out_of_many(self) -> None:
+        scanner = self.scanner_for(
+            [
+                {"id": "1", "title": "other", "markets": [raw_market(bestAsk=0.9)]},
+                {"id": "32225", "title": "House 2026", "markets": [raw_market(bestAsk=0.4)]},
+            ]
+        )
+
+        title, outcomes = await scanner.fetch_event_outcomes("32225")
+
+        self.assertEqual(title, "House 2026")
+        self.assertAlmostEqual(outcomes[0].best_ask, 0.4)
+
+    async def test_an_unknown_event_returns_nothing(self) -> None:
+        scanner = self.scanner_for([])
+
+        self.assertEqual(await scanner.fetch_event_outcomes("999"), ("", []))
+
+    async def test_members_without_both_tokens_are_dropped(self) -> None:
+        scanner = self.scanner_for(
+            [
+                {
+                    "id": "1",
+                    "title": "E",
+                    "markets": [raw_market(clobTokenIds=json.dumps(["only-one"]))],
+                }
+            ]
+        )
+
+        _, outcomes = await scanner.fetch_event_outcomes("1")
+
+        self.assertEqual(outcomes, [])
+
+
 class OneSidedBookTests(unittest.TestCase):
     """A market about to resolve has one side empty -- and it is still tradeable.
 

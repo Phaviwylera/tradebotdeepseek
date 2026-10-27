@@ -60,6 +60,11 @@ class Market:
     # 1-cent edge at 0.94 is 28% fee at the sports rate.
     fee_rate: float = 0.0
     fee_exponent: int = 1
+    # NegRisk membership: M mutually exclusive outcomes of which exactly one
+    # resolves YES. Needed for basket arbitrage, which a binary view cannot see.
+    neg_risk: bool = False
+    neg_risk_id: str = ""
+    event_id: str = ""
 
     def fee_per_share(self, price: float) -> float:
         from fees import FeeSchedule
@@ -73,6 +78,25 @@ class Market:
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
         return (self.end_date - current).total_seconds() / 86400.0
+
+
+@dataclass(frozen=True, slots=True)
+class EventOutcome:
+    """One member of a multi-outcome (NegRisk) event, priced from Gamma.
+
+    ``best_ask`` is Gamma's convenience field, used only for *screening*. A
+    basket that screens as profitable is re-priced from the real CLOB books
+    before anything is recorded.
+    """
+
+    condition_id: str
+    question: str
+    label: str
+    token_yes: str
+    best_ask: float | None
+    fee_rate: float
+    fee_exponent: int
+    tradable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +351,72 @@ class MarketScanner:
         )
         return markets
 
+    async def fetch_event_outcomes(self, event_id: str) -> tuple[str, list[EventOutcome]]:
+        """Every outcome of one NegRisk event, in a single Gamma call.
+
+        Gamma ignores an ``event_id`` filter on ``/markets`` (it happily returns
+        unrelated markets), so membership has to come from the event itself.
+        """
+        if not event_id:
+            return "", []
+        http = self._get_http()
+        payload = await self._get_json(http, "/events", {"id": event_id})
+        if isinstance(payload, Mapping):
+            payload = payload.get("data", [])
+        if not isinstance(payload, Sequence) or isinstance(payload, str | bytes):
+            raise TypeError("Unexpected Gamma events response")
+        if not payload:
+            return "", []
+        # Gamma has been observed to ignore filters (`/markets?event_id=` returns
+        # unrelated markets), so never trust payload[0]: pick the event whose id
+        # actually matches, or nothing at all. Pricing a different event's
+        # members as this basket would invent an arbitrage that does not exist.
+        event = next(
+            (
+                candidate
+                for candidate in payload
+                if isinstance(candidate, Mapping) and str(candidate.get("id") or "") == event_id
+            ),
+            None,
+        )
+        if event is None:
+            logger.warning("Gamma returned no event with id %s; skipping basket", event_id)
+            return "", []
+        title = str(event.get("title") or "")
+        outcomes: list[EventOutcome] = []
+        for raw in event.get("markets") or []:
+            if not isinstance(raw, Mapping):
+                continue
+            tokens = _json_list(raw.get("clobTokenIds"))
+            outcomes_list = [str(item).strip().lower() for item in _json_list(raw.get("outcomes"))]
+            if len(tokens) != 2:
+                continue
+            token_yes = (
+                str(tokens[outcomes_list.index("yes")])
+                if "yes" in outcomes_list
+                else str(tokens[0])
+            )
+            schedule = from_gamma(raw)
+            tradable = (
+                not _truthy(raw.get("closed"))
+                and _truthy(raw.get("active", True))
+                and _truthy(raw.get("acceptingOrders", True))
+                and _truthy(raw.get("enableOrderBook", True))
+            )
+            outcomes.append(
+                EventOutcome(
+                    condition_id=str(raw.get("conditionId") or ""),
+                    question=str(raw.get("question") or ""),
+                    label=str(raw.get("groupItemTitle") or raw.get("question") or ""),
+                    token_yes=token_yes,
+                    best_ask=_optional_float(raw.get("bestAsk")),
+                    fee_rate=schedule.effective_rate,
+                    fee_exponent=schedule.exponent,
+                    tradable=tradable,
+                )
+            )
+        return title, outcomes
+
     async def get_orderbook(self, token_id: str) -> OrderBook:
         client = self._get_clob()
         raw = await asyncio.to_thread(client.get_order_book, token_id)
@@ -433,6 +523,12 @@ class MarketScanner:
         question = str(raw.get("question") or raw.get("title") or condition_id)
 
         schedule = from_gamma(raw)
+        event_id = ""
+        events = raw.get("events")
+        if isinstance(events, Sequence) and not isinstance(events, str | bytes) and events:
+            first = events[0]
+            if isinstance(first, Mapping):
+                event_id = str(first.get("id") or "")
         return Market(
             condition_id=condition_id,
             question=question,
@@ -443,6 +539,9 @@ class MarketScanner:
             end_date=end_date,
             fee_rate=schedule.effective_rate,
             fee_exponent=schedule.exponent,
+            neg_risk=_truthy(raw.get("negRisk")),
+            neg_risk_id=str(raw.get("negRiskMarketID") or ""),
+            event_id=event_id,
         )
 
 

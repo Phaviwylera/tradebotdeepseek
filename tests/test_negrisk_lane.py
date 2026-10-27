@@ -249,6 +249,44 @@ class NegRiskBasketTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.diagnostics["negrisk_checked"], 2)
         self.assertEqual(bot.diagnostics["negrisk_groups"], 3)
 
+    async def test_coverage_rotates_across_cycles(self) -> None:
+        # Nine events, a budget of two: a fixed first-N window would price the
+        # same two forever and never look at the other seven.
+        seen: list[str] = []
+
+        class Recording:
+            async def fetch_event_outcomes(self, event_id: str):
+                seen.append(event_id)
+                return "Event", [outcome("A", 0.30), outcome("B", 0.30)]
+
+        bot = TradingBot(
+            settings=make_settings(negrisk_max_events=2),
+            scanner=Recording(),
+            ledger=FakeLedger(),
+            strategy=StrategyEngine(min_ev=0.02, max_bet=20.0),
+            risk=SimpleNamespace(),
+            model=SimpleNamespace(loaded=False),
+            executor=SimpleNamespace(),
+        )
+        markets = [negrisk_market(str(index)) for index in range(5)]
+
+        for _ in range(5):
+            await bot._run_negrisk_lane(markets)
+
+        self.assertEqual(len(seen), 10)
+        self.assertEqual(len(set(seen)), 5)
+        self.assertEqual([seen.count(str(index)) for index in range(5)], [2, 2, 2, 2, 2])
+
+    async def test_a_budget_larger_than_the_group_count_does_not_duplicate(self) -> None:
+        bot, ledger = make_bot(
+            [outcome("A", 0.30), outcome("B", 0.30)], make_settings(negrisk_max_events=5)
+        )
+
+        await bot._run_negrisk_lane([negrisk_market()])
+
+        self.assertEqual(bot.diagnostics["negrisk_checked"], 1)
+        self.assertEqual(len(ledger.signals), 2)
+
     async def test_duplicate_markets_of_one_event_are_fetched_once(self) -> None:
         bot, _ = make_bot([outcome("A", 0.30), outcome("B", 0.30)])
         markets = [negrisk_market("32225"), negrisk_market("32225")]

@@ -204,8 +204,10 @@ NEGRISK <event> basket_cost=0.9315 profit_per_basket=0.0685 baskets=21 fee=0.010
 Recording rather than ordering is deliberate. The executor submits one order per
 signal, so `M` signals can fill asymmetrically and leave a naked directional
 position — the opposite of risk-free. `/healthz` publishes `negrisk_groups`,
-`negrisk_checked`, `negrisk_best_cost` and `negrisk_best_profit`, so "no baskets
-today" is visible rather than silent. `NEGRISK_ENABLED=false` turns the lane off.
+`negrisk_checked` (events priced this cycle), `negrisk_incomplete` (events whose
+members could not all be priced), `negrisk_best_cost` and `negrisk_best_profit`.
+All four reset every cycle, so `{"checked": 2, "incomplete": 2, "best_cost": null}`
+says exactly what happened rather than leaving a bare null. `NEGRISK_ENABLED=false` turns the lane off.
 
 ### 5. Growth feasibility and market-making quotes (tools, not strategies)
 

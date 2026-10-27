@@ -80,5 +80,49 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.serve_dashboard)
 
 
+class SignalGateSettingsTests(unittest.TestCase):
+    """Widening the gates must be a visible env change, not a code edit."""
+
+    def test_defaults_match_the_strict_band(self) -> None:
+        settings = build()
+        self.assertEqual(settings.min_ev, 0.02)
+        self.assertEqual(settings.arb_threshold, 0.985)
+        self.assertEqual(settings.snipe_min_ask, 0.93)
+        self.assertEqual(settings.snipe_hold_probability, 0.95)
+        self.assertEqual(settings.snipe_max_ttl_hours, 2.4)
+
+    def test_widened_gates_are_read_from_the_environment(self) -> None:
+        settings = build(MIN_EV="0.01", SNIPE_MIN_ASK="0.90")
+        self.assertEqual(settings.min_ev, 0.01)
+        self.assertEqual(settings.snipe_min_ask, 0.90)
+        self.assertIn("snipe_band", settings.public_summary())
+
+    def test_summary_publishes_the_band_without_secrets(self) -> None:
+        summary = build(MIN_EV="0.01", SNIPE_MIN_ASK="0.90").public_summary()
+        self.assertEqual(summary["snipe_band"], [0.90, 0.97])
+        self.assertEqual(summary["min_ev"], 0.01)
+
+    def test_inverted_band_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            build(SNIPE_MIN_ASK="0.95", SNIPE_MAX_ASK="0.90")
+
+    def test_a_band_at_or_above_one_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            build(SNIPE_MAX_ASK="1.01")
+        with self.assertRaises(ValueError):
+            build(SNIPE_MIN_ASK="1.0")
+
+    def test_hold_probability_outside_zero_one_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            build(SNIPE_HOLD_PROBABILITY="0")
+        with self.assertRaises(ValueError):
+            build(SNIPE_HOLD_PROBABILITY="1.2")
+
+    def test_arb_threshold_above_one_is_rejected(self) -> None:
+        # 1.01 would call a *loss* an arbitrage.
+        with self.assertRaises(ValueError):
+            build(ARB_THRESHOLD="1.01")
+
+
 if __name__ == "__main__":
     unittest.main()

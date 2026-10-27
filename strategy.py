@@ -33,6 +33,12 @@ class StrategyEngine:
         min_ev: float = 0.02,
         max_bet: float = 20.0,
         snipe_overdue_hours: float = 24.0,
+        *,
+        arb_threshold: float = ARBITRAGE_THRESHOLD,
+        snipe_min_ask: float = SNIPE_MIN_ASK,
+        snipe_max_ask: float = SNIPE_MAX_ASK,
+        snipe_hold_probability: float = SNIPE_HOLD_PROBABILITY,
+        snipe_max_ttl_days: float = SNIPE_MAX_TTL_DAYS,
     ) -> None:
         if min_ev < 0:
             raise ValueError("min_ev must be non-negative")
@@ -40,8 +46,21 @@ class StrategyEngine:
             raise ValueError("max_bet must be positive")
         if snipe_overdue_hours < 0:
             raise ValueError("snipe_overdue_hours must be non-negative")
+        if not 0.0 < snipe_min_ask < snipe_max_ask <= 1.0:
+            raise ValueError("need 0 < snipe_min_ask < snipe_max_ask <= 1")
+        if not 0.0 < snipe_hold_probability <= 1.0:
+            raise ValueError("snipe_hold_probability must be in (0, 1]")
+        if snipe_max_ttl_days <= 0:
+            raise ValueError("snipe_max_ttl_days must be positive")
         self.min_ev = float(min_ev)
         self.max_bet = float(max_bet)
+        # Every gate is configurable so widening the band is a deliberate,
+        # visible decision in the environment, not an edit to constants.
+        self.arb_threshold = float(arb_threshold)
+        self.snipe_min_ask = float(snipe_min_ask)
+        self._snipe_max_ask_setting = float(snipe_max_ask)
+        self.snipe_hold_probability = float(snipe_hold_probability)
+        self.snipe_max_ttl_days = float(snipe_max_ttl_days)
         # Gamma's endDate is the scheduled close. For a sports market that is the
         # kick-off, so a match that is still being played has a *negative* ttl —
         # exactly the window where a 0.93 ask means "almost certainly resolves
@@ -62,7 +81,7 @@ class StrategyEngine:
             return []
 
         total = yes_ask + no_ask
-        if total <= 0.0 or total >= ARBITRAGE_THRESHOLD:
+        if total <= 0.0 or total >= self.arb_threshold:
             return []
 
         shares = math.floor((self.max_bet / total) * 100.0) / 100.0
@@ -109,21 +128,21 @@ class StrategyEngine:
         matter how near resolution the market is, so the two are reconciled here
         instead of leaving a band that can never fire.
         """
-        return min(SNIPE_MAX_ASK, SNIPE_HOLD_PROBABILITY / (1.0 + self.min_ev))
+        return min(self._snipe_max_ask_setting, self.snipe_hold_probability / (1.0 + self.min_ev))
 
     def snipe_band(self) -> tuple[float, float]:
         """Half-open ask range the snipe strategy can actually trade."""
-        return max(SNIPE_MIN_ASK, 0.0), self.snipe_max_ask()
+        return max(self.snipe_min_ask, 0.0), self.snipe_max_ask()
 
     def describe_gates(self) -> str:
         """One line a log can print so "why is it quiet?" is answerable."""
-        low = max(SNIPE_MIN_ASK, 0.0)
+        low = max(self.snipe_min_ask, 0.0)
         high = self.snipe_max_ask()
         return (
-            f"ARB fires when yes_ask + no_ask < {ARBITRAGE_THRESHOLD:.3f}; "
-            f"SNIPE fires when ttl_days < {SNIPE_MAX_TTL_DAYS:.2f} (or up to "
+            f"ARB fires when yes_ask + no_ask < {self.arb_threshold:.3f}; "
+            f"SNIPE fires when ttl_days < {self.snipe_max_ttl_days:.2f} (or up to "
             f"{self.snipe_overdue_hours:.0f}h past the scheduled close) and the best ask "
-            f"is in [{low:.4f}, {high:.4f}) with hold={SNIPE_HOLD_PROBABILITY:.2f} "
+            f"is in [{low:.4f}, {high:.4f}) with hold={self.snipe_hold_probability:.2f} "
             f"min_ev={self.min_ev:.4f}"
             + ("" if high > low else " (this band is empty: raise SNIPE hold or lower MIN_EV)")
         )
@@ -143,7 +162,7 @@ class StrategyEngine:
         """
         current = now or datetime.now(timezone.utc)
         ttl_days = market.ttl_days(current)
-        if ttl_days is None or ttl_days >= SNIPE_MAX_TTL_DAYS:
+        if ttl_days is None or ttl_days >= self.snipe_max_ttl_days:
             return []
         # Past the scheduled close but not yet resolved (in-play, or awaiting
         # settlement): still inside the thesis, up to a bounded lateness so a
@@ -158,9 +177,9 @@ class StrategyEngine:
             ("NO", market.token_no, no_book),
         ):
             ask = book.best_ask
-            if ask is None or not (SNIPE_MIN_ASK <= ask < self.snipe_max_ask()):
+            if ask is None or not (self.snipe_min_ask <= ask < self.snipe_max_ask()):
                 continue
-            ev_roi = (SNIPE_HOLD_PROBABILITY - ask) / ask
+            ev_roi = (self.snipe_hold_probability - ask) / ask
             if ev_roi <= self.min_ev:
                 continue
             size_usd = self.max_bet
@@ -173,7 +192,7 @@ class StrategyEngine:
                     size_usd=size_usd,
                     reason=(
                         f"SNIPE {label} ttl_h={ttl_days * 24.0:.2f} "
-                        f"ask={ask:.4f} hold={SNIPE_HOLD_PROBABILITY:.2f} "
+                        f"ask={ask:.4f} hold={self.snipe_hold_probability:.2f} "
                         f"ev_roi={ev_roi:.4f}"
                     ),
                     expected_value=size_usd * ev_roi,

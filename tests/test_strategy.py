@@ -226,3 +226,57 @@ class OverdueSnipeTests(unittest.TestCase):
         self.assertIn("24h past the scheduled close", self.engine.describe_gates())
         low, high = self.engine.snipe_band()
         self.assertEqual((low, round(high, 4)), (0.93, 0.9314))
+
+
+class ConfigurableGateTests(unittest.TestCase):
+    """The widened band used on the free deployment, and its cost."""
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        self.market = make_market(self.now + timedelta(hours=1))
+
+    def test_widened_band_accepts_a_price_the_strict_band_rejects(self) -> None:
+        strict = StrategyEngine(min_ev=0.02)
+        widened = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+        self.assertEqual(
+            (round(strict.snipe_band()[0], 4), round(strict.snipe_band()[1], 4)), (0.93, 0.9314)
+        )
+        self.assertEqual(
+            (round(widened.snipe_band()[0], 4), round(widened.snipe_band()[1], 4)), (0.90, 0.9406)
+        )
+        yes_book = make_book("yes-token", 0.9100, 0.9200)
+        no_book = make_book("no-token", 0.0700, 0.0800)
+        self.assertEqual(strict.check_snipe(self.market, yes_book, no_book, now=self.now), [])
+        self.assertEqual(len(widened.check_snipe(self.market, yes_book, no_book, now=self.now)), 1)
+
+    def test_widening_never_bypasses_the_ev_gate(self) -> None:
+        # 0.945 clears the loosened band floor but not MIN_EV=0.01 (cap 0.9406).
+        widened = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+        signals = widened.check_snipe(
+            self.market,
+            make_book("yes-token", 0.9300, 0.9450),
+            make_book("no-token", 0.0500, 0.0550),
+            now=self.now,
+        )
+        self.assertEqual(signals, [])
+
+    def test_gates_and_band_are_reported_from_the_instance(self) -> None:
+        widened = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+        self.assertIn("0.9000, 0.9406", widened.describe_gates())
+        self.assertIn("hold=0.95", widened.describe_gates())
+
+    def test_inverted_band_is_rejected_at_construction(self) -> None:
+        with self.assertRaises(ValueError):
+            StrategyEngine(snipe_min_ask=0.95, snipe_max_ask=0.90)
+        with self.assertRaises(ValueError):
+            StrategyEngine(snipe_hold_probability=0.0)
+        with self.assertRaises(ValueError):
+            StrategyEngine(snipe_max_ttl_days=0.0)
+
+    def test_arb_threshold_is_configurable(self) -> None:
+        strict = StrategyEngine(arb_threshold=0.985)
+        loose = StrategyEngine(arb_threshold=1.002)
+        yes_book = make_book("yes-token", 0.4900, 0.5000)
+        no_book = make_book("no-token", 0.4900, 0.5000)
+        self.assertEqual(len(strict.check_arbitrage(self.market, yes_book, no_book)), 0)
+        self.assertEqual(len(loose.check_arbitrage(self.market, yes_book, no_book)), 2)

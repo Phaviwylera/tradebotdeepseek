@@ -108,6 +108,16 @@ The 95% hold probability is an assumption, not an observed fact. With
 is intentional. A market at 0.97 has little remaining edge under that
 assumption.
 
+**Widening the band is a decision, not a fix.** The strict defaults produce
+`[0.9300, 0.9314)` — 0.14 cents wide — which is honest but almost never trades.
+`MIN_EV`, `SNIPE_MIN_ASK`, `SNIPE_MAX_ASK`, `SNIPE_HOLD_PROBABILITY`,
+`SNIPE_MAX_TTL_HOURS` and `ARB_THRESHOLD` are all env vars, so a deployment can
+opt into a wider band explicitly (`render.yaml` ships `MIN_EV=0.01` and
+`SNIPE_MIN_ASK=0.90`, i.e. `[0.9000, 0.9406)`). The cost is real: the 0.95 hold
+assumption is being applied at 0.90, where it is least reliable, so the same
+expected value buys a weaker bet. The live band is published on `/healthz`
+(`gates.snipe_band`) and in the console banner — never hard-coded in the page.
+
 The second and third conditions are the same inequality, so the code reconciles
 them: the highest ask that can ever fire is
 `hold / (1 + MIN_EV)` = `0.95 / 1.02` ≈ **0.9314**, not 0.97. At startup the
@@ -116,8 +126,12 @@ mysterious:
 
 ```text
 Signal gates: ARB fires when yes_ask + no_ask < 0.985; SNIPE fires when
-ttl_days < 0.10 and the best ask is in [0.9300, 0.9314) with hold=0.95 min_ev=0.0200
+ttl_days < 0.10 (or up to 24h past the scheduled close) and the best ask is in
+[0.9000, 0.9406) with hold=0.95 min_ev=0.0100
 ```
+
+The numbers in that line and on the console come from the running process, so a
+widened deployment reports the widened band.
 
 Both gates are genuinely rare: a complete YES+NO set below 0.985, or a market
 resolving in under 2.4 hours trading under 0.9314. `/healthz` reports
@@ -260,7 +274,12 @@ network, no account. The console is also deployed publicly from
 | `MAX_DAILY_LOSS_PCT` | `0.20` | Kill switch at 20% daily equity loss. |
 | `MAX_DRAWDOWN_PCT` | `0.40` | Kill switch at 40% peak drawdown. |
 | `MAX_EXPOSURE_PCT` | `0.30` | Open cost basis as a fraction of equity. |
-| `MIN_EV` | `0.02` | Minimum edge/return threshold. |
+| `MIN_EV` | `0.02` | Minimum edge/return threshold. Also sets the snipe cap: `hold / (1 + MIN_EV)`. |
+| `SNIPE_MIN_ASK` | `0.93` | Lower edge of the snipe price band. `0.93` → a 0.14-cent band; `0.90` → ~4 cents. |
+| `SNIPE_MAX_ASK` | `0.97` | Upper edge the strategy is willing to look at (the EV cap usually binds first). |
+| `SNIPE_HOLD_PROBABILITY` | `0.95` | Assumed probability a near-resolution market at the target price resolves YES. |
+| `SNIPE_MAX_TTL_HOURS` | `2.4` | How far *before* the scheduled close sniping starts. |
+| `ARB_THRESHOLD` | `0.985` | YES+NO ask must cost less than this to count as arbitrage. |
 | `LEDGER_PATH` | `ledger.db` | SQLite file. Falls back to `/tmp/polymarket-bot/` with a warning if the path is not writable. |
 | `MODEL_PATH` | `model.joblib` | Optional calibrated model artifact. |
 | `MODEL_URL` | *(empty)* | Download the artifact at startup when `MODEL_PATH` is absent. How a diskless host gets a model. |

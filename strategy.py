@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from fees import arbitrage_cost, max_price_for_hold, net_edge
 from scanner import Market, OrderBook
 
 ARBITRAGE_THRESHOLD = 0.985
@@ -39,6 +40,8 @@ class StrategyEngine:
         snipe_max_ask: float = SNIPE_MAX_ASK,
         snipe_hold_probability: float = SNIPE_HOLD_PROBABILITY,
         snipe_max_ttl_days: float = SNIPE_MAX_TTL_DAYS,
+        measured_hold: float | None = None,
+        measured_hold_source: str = "",
     ) -> None:
         if min_ev < 0:
             raise ValueError("min_ev must be non-negative")
@@ -60,6 +63,11 @@ class StrategyEngine:
         self.snipe_min_ask = float(snipe_min_ask)
         self._snipe_max_ask_setting = float(snipe_max_ask)
         self.snipe_hold_probability = float(snipe_hold_probability)
+        # Measured evidence may only make the assumption *more* conservative.
+        self.measured_hold = None if measured_hold is None else float(measured_hold)
+        if self.measured_hold is not None and not 0.0 < self.measured_hold <= 1.0:
+            raise ValueError("measured_hold must be in (0, 1]")
+        self.measured_hold_source = measured_hold_source
         self.snipe_max_ttl_days = float(snipe_max_ttl_days)
         # Gamma's endDate is the scheduled close. For a sports market that is the
         # kick-off, so a match that is still being played has a *negative* ttl —
@@ -82,6 +90,13 @@ class StrategyEngine:
 
         total = yes_ask + no_ask
         if total <= 0.0 or total >= self.arb_threshold:
+            return []
+        # That check is pre-fee arithmetic. On a fee-bearing market a 0.985 pair
+        # near 0.49 costs 0.985 + 2 * 0.0123 = 1.0096 -- a guaranteed loss -- so
+        # the pair is only taken when it clears 1.000 *after* both legs are
+        # charged, and still clears the configured margin.
+        cost, profit = arbitrage_cost(yes_ask, no_ask, market.fee_rate, market.fee_exponent)
+        if profit <= 0.0 or cost >= self.arb_threshold:
             return []
 
         shares = math.floor((self.max_bet / total) * 100.0) / 100.0
@@ -119,31 +134,51 @@ class StrategyEngine:
             ),
         ]
 
-    def snipe_max_ask(self) -> float:
-        """Highest ask that still clears ``MIN_EV`` against the hold assumption.
+    @property
+    def effective_hold(self) -> float:
+        """The hold probability the EV gate uses: measured if available."""
+        if self.measured_hold is not None:
+            return min(self.measured_hold, self.snipe_hold_probability)
+        return self.snipe_hold_probability
 
-        ``SNIPE_MAX_ASK`` is the price band the strategy is willing to look at;
-        the EV gate is what actually binds. Buying above
-        ``hold / (1 + min_ev)`` cannot clear ``(hold - ask) / ask > min_ev`` no
-        matter how near resolution the market is, so the two are reconciled here
-        instead of leaving a band that can never fire.
+    def snipe_max_ask(self, fee_rate: float = 0.0) -> float:
+        """Highest ask that clears ``MIN_EV`` against the hold, fees included.
+
+        ``SNIPE_MAX_ASK`` is the band the strategy is willing to look at; the EV
+        gate is what actually binds. Solving ``(hold - ask - fee) / ask > min_ev``
+        gives a *fee-dependent* cap: with a 5% sports fee and a 2% target the cap
+        is 0.9281, which is **below** the old 0.93 floor -- i.e. the default band
+        was empty once fees were counted.
         """
-        return min(self._snipe_max_ask_setting, self.snipe_hold_probability / (1.0 + self.min_ev))
+        cap = max_price_for_hold(
+            self.effective_hold,
+            self.min_ev,
+            fee_rate,
+            ceiling=self._snipe_max_ask_setting,
+        )
+        return cap if cap is not None else 0.0
 
-    def snipe_band(self) -> tuple[float, float]:
+    def snipe_band(self, fee_rate: float = 0.0) -> tuple[float, float]:
         """Half-open ask range the snipe strategy can actually trade."""
-        return max(self.snipe_min_ask, 0.0), self.snipe_max_ask()
+        return max(self.snipe_min_ask, 0.0), self.snipe_max_ask(fee_rate)
 
     def describe_gates(self) -> str:
         """One line a log can print so "why is it quiet?" is answerable."""
         low = max(self.snipe_min_ask, 0.0)
         high = self.snipe_max_ask()
+        strict_high = self.snipe_max_ask(0.05)
         return (
             f"ARB fires when yes_ask + no_ask < {self.arb_threshold:.3f}; "
             f"SNIPE fires when ttl_days < {self.snipe_max_ttl_days:.2f} (or up to "
             f"{self.snipe_overdue_hours:.0f}h past the scheduled close) and the best ask "
-            f"is in [{low:.4f}, {high:.4f}) with hold={self.snipe_hold_probability:.2f} "
+            f"is in [{low:.4f}, {high:.4f}) fee-free, or [{low:.4f}, {strict_high:.4f}) "
+            f"with a 5% taker fee, at hold={self.effective_hold:.4f} "
             f"min_ev={self.min_ev:.4f}"
+            + (
+                f" (measured: {self.measured_hold_source})"
+                if self.measured_hold and self.measured_hold_source
+                else " (hold is assumed, not measured)"
+            )
             + ("" if high > low else " (this band is empty: raise SNIPE hold or lower MIN_EV)")
         )
 
@@ -177,9 +212,12 @@ class StrategyEngine:
             ("NO", market.token_no, no_book),
         ):
             ask = book.best_ask
-            if ask is None or not (self.snipe_min_ask <= ask < self.snipe_max_ask()):
+            fee = market.fee_per_share(float(ask))
+            if ask is None or not (self.snipe_min_ask <= ask < self.snipe_max_ask(market.fee_rate)):
                 continue
-            ev_roi = (self.snipe_hold_probability - ask) / ask
+            ev_roi, _ = net_edge(
+                float(ask), self.effective_hold, market.fee_rate, market.fee_exponent
+            )
             if ev_roi <= self.min_ev:
                 continue
             size_usd = self.max_bet
@@ -192,7 +230,8 @@ class StrategyEngine:
                     size_usd=size_usd,
                     reason=(
                         f"SNIPE {label} ttl_h={ttl_days * 24.0:.2f} "
-                        f"ask={ask:.4f} hold={self.snipe_hold_probability:.2f} "
+                        f"ask={ask:.4f} hold={self.effective_hold:.4f} "
+                        f"fee={fee:.4f} "
                         f"ev_roi={ev_roi:.4f}"
                     ),
                     expected_value=size_usd * ev_roi,

@@ -224,8 +224,10 @@ DIAGNOSTIC_KEYS = (
     "best_arb_sum",
     "closest_ttl_hours",
     "snipe_band",
+    "snipe_band_5pct",
     "min_ev",
     "arb_threshold",
+    "effective_hold",
 )
 
 
@@ -240,9 +242,10 @@ def summarize_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any] 
             "ask": closest.get("ask"),
             "distance": closest.get("distance"),
         }
-    band = summary.get("snipe_band")
-    if isinstance(band, dict):
-        summary["snipe_band"] = {"min": band.get("min"), "max": band.get("max")}
+    for key in ("snipe_band", "snipe_band_5pct"):
+        band = summary.get(key)
+        if isinstance(band, dict):
+            summary[key] = {"min": band.get("min"), "max": band.get("max")}
     return summary
 
 
@@ -250,6 +253,7 @@ def build_health(
     ledger_path: Path,
     model_info: dict[str, Any] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Public, secret-free answer to "is the trading loop actually running?".
 
@@ -281,6 +285,7 @@ def build_health(
         "last_error": None,
         "model": summarize_model(model_info),
         "gates": summarize_diagnostics(diagnostics),
+        "evidence": evidence,
     }
     try:
         payload.update(health_detail(ledger_path))
@@ -414,6 +419,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     dashboard_token: str = ""
     model_info: dict[str, Any] | None = None
     diagnostics: dict[str, Any] | None = None
+    evidence: dict[str, Any] | None = None
     allowed_origin: str = ""
     dashboard_dir: Path | None = None
 
@@ -514,7 +520,12 @@ class StatusHandler(BaseHTTPRequestHandler):
             # whether anything is actually happening.
             self._send(
                 200,
-                build_health(self.ledger_path, self.model_info, self.diagnostics),
+                build_health(
+                    self.ledger_path,
+                    self.model_info,
+                    self.diagnostics,
+                    self.evidence,
+                ),
             )
             return
 
@@ -579,6 +590,7 @@ def create_server(
     dashboard_dir: Path | None = None,
     model_info: dict[str, Any] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
     handler: type[StatusHandler] = StatusHandler,
 ) -> StatusHTTPServer:
     """Build (but do not start) a bound read-only status server."""
@@ -600,6 +612,7 @@ def create_server(
             "dashboard_dir": resolved_dir,
             "model_info": model_info,
             "diagnostics": diagnostics,
+            "evidence": evidence,
         },
     )
     return StatusHTTPServer((host, port), bound_handler)
@@ -639,6 +652,7 @@ def start_status_server(
     serve_dashboard: bool | None = None,
     model_info: dict[str, Any] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> tuple[StatusHTTPServer, threading.Thread]:
     """Start the read-only server on a daemon thread and return it."""
     resolved_host, resolved_port = resolve_bind()
@@ -672,6 +686,7 @@ def start_status_server(
         dashboard_dir=directory if serve_dashboard else None,
         model_info=model_info,
         diagnostics=diagnostics,
+        evidence=evidence,
     )
     actual_host, actual_port = server.server_address[:2]
     if actual_host not in {"127.0.0.1", "::1", "localhost"} and not token:

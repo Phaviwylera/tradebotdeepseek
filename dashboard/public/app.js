@@ -460,6 +460,7 @@ function describeHealth(health) {
         ? ` Model unavailable: ${model.error}.`
         : " Model off, so only ARB + SNIPE are looking for edge.";
   const gatesNote = describeGates(health.gates);
+  const evidenceNote = describeEvidence(health.evidence);
   const loopSentence = Number.isFinite(stale)
     ? `last cycle ${formatDuration(stale)} ago`
     : "last cycle time unknown";
@@ -472,9 +473,10 @@ function describeHealth(health) {
   ]
     .filter(Boolean)
     .join(", ");
+  const plural = (n, one, many) => `${valueOrDash(n)} ${n === 1 ? one : many}`;
   const totals = [
-    `${valueOrDash(counts.signals_total)} signals`,
-    `${valueOrDash(counts.orders_total)} orders ever`,
+    plural(counts.signals_total, "signal", "signals"),
+    plural(counts.orders_total, "order", "orders ever"),
   ].join(" · ");
 
   if (loop === "error") {
@@ -508,7 +510,7 @@ function describeHealth(health) {
   return {
     tone: "info",
     title: `Token required — but the bot is running (${mode})`,
-    text: `Live from /healthz: ${loopSentence}; ${cycleSentence}. Total ${totals}.${dryRunNote}${modelNote}${gatesNote} ${tokenHint} The cards and tables below are sample data, not its results.`,
+    text: `Live from /healthz: ${loopSentence}; ${cycleSentence}. Total ${totals}.${dryRunNote}${modelNote}${gatesNote}${evidenceNote} ${tokenHint} The cards and tables below are sample data, not its results.`,
   };
 }
 
@@ -522,12 +524,15 @@ function describeGates(gates) {
   const arb = Number(gates.best_arb_sum);
   const arbThreshold = Number(gates.arb_threshold);
   const closest = gates.closest_snipe_price;
-  const band = gates.snipe_band && typeof gates.snipe_band === "object" ? gates.snipe_band : null;
+  // Prefer the fee-aware band: it is the one that actually decides a trade.
+  const bandSource = gates.snipe_band_5pct || gates.snipe_band;
+  const band = bandSource && typeof bandSource === "object" ? bandSource : null;
+  const bandIsFeeAware = Boolean(gates.snipe_band_5pct);
   const bandLow = band ? Number(band.min) : NaN;
   const bandHigh = band ? Number(band.max) : NaN;
   const bandText =
     Number.isFinite(bandLow) && Number.isFinite(bandHigh)
-      ? `${bandLow.toFixed(4)}–${bandHigh.toFixed(4)}`
+      ? `${bandLow.toFixed(4)}–${bandHigh.toFixed(4)}${bandIsFeeAware ? " after a 5% taker fee" : ""}`
       : "its price band";
 
   const parts = [];
@@ -551,6 +556,24 @@ function describeGates(gates) {
   }
   if (!parts.length) return "";
   return ` Gates: ${parts.join("; ")}.`;
+}
+
+// Say out loud whether the hold probability driving every signal is measured
+// or merely assumed.
+function describeEvidence(evidence) {
+  if (!evidence || typeof evidence !== "object") return "";
+  const source = evidence.source === "measured" ? "measured" : "assumed";
+  const hold = Number(evidence.effective_hold);
+  if (source === "measured") {
+    const n = Number(evidence.n);
+    const verdict = evidence.verdict || "UNKNOWN";
+    return (
+      ` Hold ${Number.isFinite(hold) ? hold.toFixed(4) : "?"} is ${source}` +
+      (Number.isFinite(n) ? ` on ${n} resolved markets` : "") +
+      ` (${verdict}).`
+    );
+  }
+  return ` Hold assumption${Number.isFinite(hold) ? ` ${hold.toFixed(2)}` : ""} is not measured yet; no evidence file is loaded.`;
 }
 
 function showNotice({ tone, title, text, actionLabel, action }) {

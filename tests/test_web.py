@@ -398,6 +398,30 @@ class GateDiagnosticsTests(unittest.TestCase):
         self.assertEqual(summary["closest_snipe_price"], {"ask": 0.9123, "distance": 0.0177})
         self.assertNotIn("secret", summary)
 
+    def test_summary_publishes_the_negrisk_lane(self) -> None:
+        summary = web.summarize_diagnostics(
+            {
+                "negrisk_groups": 2,
+                "negrisk_checked": 2,
+                "negrisk_best_cost": 1.0142,
+                "negrisk_best_profit": -0.0142,
+            }
+        )
+        assert summary is not None
+        self.assertEqual(summary["negrisk_groups"], 2)
+        self.assertEqual(summary["negrisk_checked"], 2)
+        self.assertAlmostEqual(summary["negrisk_best_cost"], 1.0142)
+        self.assertAlmostEqual(summary["negrisk_best_profit"], -0.0142)
+
+    def test_negrisk_keys_are_present_even_when_unset(self) -> None:
+        # A missing key reads as "not implemented"; an explicit null reads as
+        # "looked, found nothing". The difference matters when debugging.
+        summary = web.summarize_diagnostics({})
+        assert summary is not None
+        self.assertIn("negrisk_groups", summary)
+        self.assertIn("negrisk_best_cost", summary)
+        self.assertIsNone(summary["negrisk_best_cost"])
+
     def test_no_diagnostics_means_null_not_empty(self) -> None:
         self.assertIsNone(web.summarize_diagnostics(None))
 

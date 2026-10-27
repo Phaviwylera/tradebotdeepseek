@@ -177,6 +177,63 @@ A directional signal requires:
 If `model.joblib` is missing or fails to load, the bot deliberately runs
 arbitrage and sniping only.
 
+### 4. NegRisk basket parity
+
+A NegRisk event has `M` mutually exclusive outcomes of which exactly one resolves
+YES, so their prices must sum to 1.00 at settlement. If all `M` best asks can be
+bought for less than 1.00 **after taker fees**, the payoff is certain: the trade
+needs no forecast and no wallet, only market orders.
+
+`negrisk.py` scores those baskets and refuses the two mistakes that make them
+look better than they are:
+
+- **partial baskets**: three of twelve outcomes sum to ~0.3, which reads as a 70%
+  edge. `evaluate_basket(complete=False)` will not score one.
+- **ignoring fees**: `M` legs means `M` taker fees, charged as `rate · p · (1−p)`.
+  Three 0.32 legs read as a 4% edge at 0.96; three 5% fees turn that into 0.7%.
+
+The cycle collects NegRisk events, fetches each event's members in one Gamma call
+(`/markets?event_id=` silently ignores the filter, so membership comes from the
+event), prices the complete basket, and records one signal per leg with
+`executed=False`:
+
+```text
+NEGRISK <event> basket_cost=0.9315 profit_per_basket=0.0685 baskets=21 fee=0.0105 | DRY_RUN multi-leg execution not implemented
+```
+
+Recording rather than ordering is deliberate. The executor submits one order per
+signal, so `M` signals can fill asymmetrically and leave a naked directional
+position — the opposite of risk-free. `/healthz` publishes `negrisk_groups`,
+`negrisk_checked`, `negrisk_best_cost` and `negrisk_best_profit`, so "no baskets
+today" is visible rather than silent. `NEGRISK_ENABLED=false` turns the lane off.
+
+### 5. Growth feasibility and market-making quotes (tools, not strategies)
+
+`research/growth.py` answers "can this bankroll reach this number" with
+arithmetic instead of optimism. `$20 → $6,000 in 3 days` is 300x, **+569.43%/day**,
+**3.54** consecutive all-in wins at 0.20, and a fair-priced survival probability
+of **0.333%** — ruin 99.667% before costs. The useful identity: at a fair price
+the chance of surviving an `M`-fold target is exactly `1/M`. Compounding converts
+a tiny per-trade disadvantage into a near-certain wipeout.
+
+`marketmaking.py` computes Avellaneda–Stoikov quotes (reservation price, optimal
+spread, inventory skew) for the venue where makers pay no fee and receive a share
+of taker fees. It computes only — resting orders need L2 credentials, a funded
+wallet, and a host Polymarket does not geoblock. Note the parameter scale: `k` is
+decay per unit of *price*, and these prices live in `(0, 1)`, so the FX default
+`k≈1.5` quotes 0.001/0.999. `DEFAULT_K=100` gives a two-cent spread at a 0.60 mid.
+
+Both are runnable without touching the bot:
+
+```bash
+python scripts/quant_report.py --start 20 --target 6000 --days 3
+python scripts/quant_report.py --mid 0.62 --inventory 200
+```
+
+`docs/QUANT_STRATEGIES.md` records what was adopted from the quant memo this
+implements, and what was rejected (its fee table is ~5x wrong; `convertPositions`
+needs a funded wallet and a non-geoblocked host).
+
 ---
 
 ---
@@ -330,6 +387,10 @@ network, no account. The console is also deployed publicly from
 | `SNIPE_HOLD_PROBABILITY` | `0.95` | Assumed probability a near-resolution market at the target price resolves YES. |
 | `SNIPE_MAX_TTL_HOURS` | `2.4` | How far *before* the scheduled close sniping starts. |
 | `ARB_THRESHOLD` | `0.985` | YES+NO ask must cost less than this to count as arbitrage. |
+| `KELLY_FRACTION` | `0.25` | Fraction of full Kelly used to size model-edge signals. Validated to `(0, 1]`; `>1` is over-betting. |
+| `NEGRISK_ENABLED` | `true` | Score complete NegRisk baskets priced under 1.00 after fees. |
+| `NEGRISK_MAX_EVENTS` | `3` | How many NegRisk events to price per cycle (each is one extra Gamma call). |
+| `NEGRISK_MIN_PROFIT` | `0.005` | Minimum post-fee profit per basket before a signal is recorded. |
 | `LEDGER_PATH` | `ledger.db` | SQLite file. Falls back to `/tmp/polymarket-bot/` with a warning if the path is not writable. |
 | `MODEL_PATH` | `model.joblib` | Optional calibrated model artifact. |
 | `MODEL_URL` | *(empty)* | Download the artifact at startup when `MODEL_PATH` is absent. How a diskless host gets a model. |

@@ -26,6 +26,7 @@ from executor import ExecutionResult, OrderExecutor
 from features import build_features
 from ledger import Ledger
 from model import ProbabilityModel
+from negrisk import BasketLeg, evaluate_basket, plan_basket
 from risk import RiskManager
 from scanner import Market, MarketScanner, OrderBook, select_markets
 from snapshots import SnapshotRecorder
@@ -89,6 +90,12 @@ class TradingBot:
             "closest_snipe_price": None,
             "best_arb_sum": None,
             "closest_ttl_hours": None,
+            # NegRisk basket arbitrage: the one structural edge that needs no
+            # forecast, only a complete basket priced under 1.00 after fees.
+            "negrisk_groups": 0,
+            "negrisk_checked": 0,
+            "negrisk_best_cost": None,
+            "negrisk_best_profit": None,
             # Published so the console can quote the *live* band instead of a
             # number baked into the page.
             "snipe_band": None,
@@ -281,6 +288,11 @@ class TradingBot:
                     market.condition_id,
                 )
 
+        try:
+            generated += await self._run_negrisk_lane(markets)
+        except Exception:
+            logger.exception("NegRisk lane failed")
+
         risk_status = self.risk.status()
         logger.info(
             "Cycle complete: markets=%d books=%d new_signals=%d risk=%s snipes_in_band=%d",
@@ -343,6 +355,123 @@ class TradingBot:
 
         self._record_gate_proximity(market, yes_book, no_book)
         return generated
+
+    async def _run_negrisk_lane(self, markets: list[Market]) -> int:
+        """Look for complete NegRisk baskets priced below 1.00 after fees.
+
+        Separated from the per-market loop because it is a different kind of
+        evidence: it does not care about ttl, price bands or the model. If a
+        basket costs less than 1.00, one leg must pay 1.00 at settlement.
+        """
+        # getattr: tests (and older configs) construct partial settings objects.
+        if not getattr(self.settings, "negrisk_enabled", False):
+            return 0
+        max_events = int(getattr(self.settings, "negrisk_max_events", 0) or 0)
+        if max_events <= 0:
+            return 0
+
+        groups: dict[str, str] = {}
+        for market in markets:
+            if market.neg_risk and market.event_id and market.neg_risk_id:
+                groups.setdefault(market.event_id, market.neg_risk_id)
+        self.diagnostics["negrisk_groups"] = len(groups)
+        if not groups:
+            return 0
+
+        generated = 0
+        checked = 0
+        for event_id in list(groups)[:max_events]:
+            try:
+                title, outcomes = await self.scanner.fetch_event_outcomes(event_id)
+            except Exception:
+                logger.exception("NegRisk event %s could not be fetched", event_id)
+                continue
+            checked += 1
+            if not outcomes:
+                continue
+            # An incomplete basket is not evidence: if one member is closed or
+            # not accepting orders, the sum means nothing.
+            complete = all(
+                outcome.tradable and outcome.best_ask is not None for outcome in outcomes
+            )
+            legs = [
+                BasketLeg(
+                    token_id=outcome.token_yes,
+                    label=outcome.label,
+                    ask=float(outcome.best_ask or 0.0),
+                    fee_rate=outcome.fee_rate,
+                    fee_exponent=outcome.fee_exponent,
+                )
+                for outcome in outcomes
+                if outcome.tradable and outcome.best_ask is not None
+            ]
+            verdict = evaluate_basket(
+                legs,
+                event_id=event_id,
+                title=title,
+                complete=complete,
+                min_profit=float(getattr(self.settings, "negrisk_min_profit", 0.005)),
+            )
+            if verdict.complete and (
+                self.diagnostics["negrisk_best_cost"] is None
+                or verdict.cost < self.diagnostics["negrisk_best_cost"]
+            ):
+                self.diagnostics["negrisk_best_cost"] = round(verdict.cost, 6)
+                self.diagnostics["negrisk_best_profit"] = round(verdict.profit, 6)
+            if not verdict.profitable:
+                logger.debug("NegRisk %s: %s", title or event_id, verdict.reason)
+                continue
+            generated += await self._record_basket(verdict)
+
+        self.diagnostics["negrisk_checked"] = checked
+        return generated
+
+    async def _record_basket(self, verdict) -> int:
+        """Record a basket as a signal, never as an order.
+
+        A basket is only risk-free if *every* leg fills. The executor places one
+        order per signal, so sending M signals would leave a partial basket --
+        i.e. a naked directional bet -- the moment one leg missed. Until the
+        executor can submit a coordinated multi-leg order, this records the
+        opportunity instead of pretending to take it.
+        """
+        plan = plan_basket(verdict, max_bet=self.settings.max_bet)
+        if plan.baskets <= 0:
+            return 0
+        # One cooldown for the whole basket, keyed by event. Checking per leg
+        # would let a partially-cooled basket record only half its legs -- the
+        # partial basket this lane exists to prevent.
+        if self._is_cooling_down(verdict.event_id, "NEGRISK"):
+            logger.debug("NegRisk basket %s is cooling down", verdict.event_id)
+            return 0
+        recorded = 0
+        for leg in verdict.legs:
+            size = plan.baskets * leg.ask
+            self.ledger.record_signal(
+                market_id=verdict.event_id,
+                token_id=leg.token_id,
+                side="BUY",
+                price=leg.ask,
+                size_usd=size,
+                reason=(
+                    f"NEGRISK {verdict.title or verdict.event_id} basket_cost={verdict.cost:.4f} "
+                    f"profit_per_basket={verdict.profit:.4f} baskets={plan.baskets} "
+                    f"fee={leg.fee:.5f} | DRY_RUN multi-leg execution not implemented"
+                ),
+                expected_value=plan.baskets * (1.0 - verdict.cost) * (leg.ask / verdict.cost),
+                executed=False,
+            )
+            recorded += 1
+        if recorded:
+            logger.info(
+                "NegRisk basket: %s cost=%.4f profit/basket=%.4f baskets=%d (+%d legs)",
+                verdict.title or verdict.event_id,
+                verdict.cost,
+                verdict.profit,
+                plan.baskets,
+                recorded,
+            )
+        return recorded
 
     def _record_gate_proximity(
         self, market: Market, yes_book: OrderBook, no_book: OrderBook
@@ -795,6 +924,7 @@ async def async_main() -> None:
         snipe_max_ask=settings.snipe_max_ask,
         snipe_hold_probability=settings.snipe_hold_probability,
         snipe_max_ttl_days=settings.snipe_max_ttl_hours / 24.0,
+        kelly_fraction=settings.kelly_fraction,
         measured_hold=measured.ci_low if measured is not None else None,
         measured_hold_source=evidence_gate.report.source if measured is not None else "",
     )

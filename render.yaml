@@ -77,6 +77,20 @@ services:
         value: "0.01"
       - key: SNIPE_MIN_ASK
         value: "0.90"
+      # --- quant lanes ------------------------------------------------------
+      # Quarter Kelly on model-edge signals. Lower it if the model's probability
+      # estimate is worse than you think; it almost certainly is.
+      - key: KELLY_FRACTION
+        value: "0.25"
+      # NegRisk basket parity: buy all M outcomes of an event when the complete
+      # basket costs < 1.00 after per-leg taker fees. Signals only -- the
+      # executor cannot yet submit M legs as one risk-free basket.
+      - key: NEGRISK_ENABLED
+        value: "true"
+      - key: NEGRISK_MAX_EVENTS
+        value: "2"
+      - key: NEGRISK_MIN_PROFIT
+        value: "0.005"
       - key: LOG_LEVEL
         value: INFO
       - key: POLYGON_PRIVATE_KEY

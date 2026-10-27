@@ -153,6 +153,31 @@ class NegRiskBasketTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("NEGRISK", reason)
         self.assertIn("multi-leg execution not implemented", reason)
 
+    async def test_incomplete_events_are_counted_not_hidden(self) -> None:
+        # "checked 2, best cost null" is ambiguous; "2 incomplete" is not.
+        bot, ledger = make_bot([outcome("A", 0.30), outcome("B", None)])
+
+        self.assertEqual(await bot._run_negrisk_lane([negrisk_market()]), 0)
+        self.assertEqual(bot.diagnostics["negrisk_checked"], 1)
+        self.assertEqual(bot.diagnostics["negrisk_incomplete"], 1)
+        self.assertIsNone(bot.diagnostics["negrisk_best_cost"])
+
+    async def test_complete_events_are_not_counted_as_incomplete(self) -> None:
+        bot, _ = make_bot([outcome("A", 0.40), outcome("B", 0.40)])
+
+        await bot._run_negrisk_lane([negrisk_market()])
+
+        self.assertEqual(bot.diagnostics["negrisk_incomplete"], 0)
+        self.assertAlmostEqual(bot.diagnostics["negrisk_best_cost"], 0.80, places=6)
+
+    async def test_the_incomplete_counter_resets_each_cycle(self) -> None:
+        bot, _ = make_bot([outcome("A", 0.30), outcome("B", None)])
+        await bot._run_negrisk_lane([negrisk_market()])
+        self.assertEqual(bot.diagnostics["negrisk_incomplete"], 1)
+
+        self.assertEqual(await bot._run_negrisk_lane([]), 0)
+        self.assertEqual(bot.diagnostics["negrisk_incomplete"], 0)
+
     async def test_a_leg_that_cannot_be_priced_disables_the_event(self) -> None:
         # 0.10 + 0.10 + 0.10 on 12 outcomes would look like a 70% edge; with one
         # member unpriceable the honest answer is "no".

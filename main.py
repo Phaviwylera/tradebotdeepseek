@@ -97,6 +97,7 @@ class TradingBot:
             # forecast, only a complete basket priced under 1.00 after fees.
             "negrisk_groups": 0,
             "negrisk_checked": 0,
+            "negrisk_incomplete": 0,
             "negrisk_best_cost": None,
             "negrisk_best_profit": None,
             # Published so the console can quote the *live* band instead of a
@@ -383,6 +384,7 @@ class TradingBot:
         self.diagnostics["negrisk_best_cost"] = None
         self.diagnostics["negrisk_best_profit"] = None
         self.diagnostics["negrisk_checked"] = 0
+        self.diagnostics["negrisk_incomplete"] = 0
         if not groups:
             return 0
 
@@ -434,6 +436,10 @@ class TradingBot:
             ):
                 self.diagnostics["negrisk_best_cost"] = round(verdict.cost, 6)
                 self.diagnostics["negrisk_best_profit"] = round(verdict.profit, 6)
+            if not verdict.complete:
+                # Counted, not hidden: "checked 2, best cost null" is ambiguous,
+                # "checked 2, 2 incomplete" says the members could not be priced.
+                self.diagnostics["negrisk_incomplete"] += 1
             if not verdict.profitable:
                 logger.debug("NegRisk %s: %s", title or event_id, verdict.reason)
                 continue

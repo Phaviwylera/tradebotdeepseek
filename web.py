@@ -234,6 +234,7 @@ DIAGNOSTIC_KEYS = (
     # because only multi-outcome events carry these fields.
     "negrisk_groups",
     "negrisk_checked",
+    "negrisk_incomplete",
     "negrisk_best_cost",
     "negrisk_best_profit",
 )

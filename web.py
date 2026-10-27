@@ -223,6 +223,9 @@ DIAGNOSTIC_KEYS = (
     "closest_snipe_price",
     "best_arb_sum",
     "closest_ttl_hours",
+    "snipe_band",
+    "min_ev",
+    "arb_threshold",
 )
 
 
@@ -237,6 +240,9 @@ def summarize_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any] 
             "ask": closest.get("ask"),
             "distance": closest.get("distance"),
         }
+    band = summary.get("snipe_band")
+    if isinstance(band, dict):
+        summary["snipe_band"] = {"min": band.get("min"), "max": band.get("max")}
     return summary
 
 

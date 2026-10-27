@@ -520,7 +520,15 @@ function describeGates(gates) {
   const selected = Number(gates.near_resolution_selected);
   const inBand = Number(gates.markets_in_snipe_band);
   const arb = Number(gates.best_arb_sum);
+  const arbThreshold = Number(gates.arb_threshold);
   const closest = gates.closest_snipe_price;
+  const band = gates.snipe_band && typeof gates.snipe_band === "object" ? gates.snipe_band : null;
+  const bandLow = band ? Number(band.min) : NaN;
+  const bandHigh = band ? Number(band.max) : NaN;
+  const bandText =
+    Number.isFinite(bandLow) && Number.isFinite(bandHigh)
+      ? `${bandLow.toFixed(4)}–${bandHigh.toFixed(4)}`
+      : "its price band";
 
   const parts = [];
   if (Number.isFinite(near)) {
@@ -530,10 +538,13 @@ function describeGates(gates) {
     );
   }
   if (Number.isFinite(inBand)) {
-    parts.push(`${inBand} inside the snipe price band (0.93–0.9314)`);
+    parts.push(`${inBand} inside the snipe price band (${bandText})`);
   }
   if (Number.isFinite(arb)) {
-    parts.push(`cheapest YES+NO pair ${arb.toFixed(4)} (needs < 0.985)`);
+    parts.push(
+      `cheapest YES+NO pair ${arb.toFixed(4)}` +
+        (Number.isFinite(arbThreshold) ? ` (needs < ${arbThreshold.toFixed(3)})` : ""),
+    );
   }
   if (closest && Number.isFinite(Number(closest.ask))) {
     parts.push(`nearest snipe ask ${Number(closest.ask).toFixed(4)}`);

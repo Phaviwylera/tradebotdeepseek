@@ -85,6 +85,11 @@ class TradingBot:
             "closest_snipe_price": None,
             "best_arb_sum": None,
             "closest_ttl_hours": None,
+            # Published so the console can quote the *live* band instead of a
+            # number baked into the page.
+            "snipe_band": None,
+            "min_ev": None,
+            "arb_threshold": None,
         }
         self.snapshots = SnapshotRecorder(getattr(settings, "snapshot_path", None))
         self._status_thread: threading.Thread | None = None
@@ -108,6 +113,10 @@ class TradingBot:
             logger.warning("DRY-RUN MODE: no authenticated CLOB requests or orders")
         # Without this, an idle console looks like a fault. The gates explain a
         # quiet bot: both remaining strategies are deliberately rare.
+        low, high = self.strategy.snipe_band()
+        self.diagnostics["snipe_band"] = {"min": round(low, 4), "max": round(high, 4)}
+        self.diagnostics["min_ev"] = self.strategy.min_ev
+        self.diagnostics["arb_threshold"] = self.strategy.arb_threshold
         logger.info("Signal gates: %s", self.strategy.describe_gates())
         if self.snapshots.enabled:
             logger.info(
@@ -739,6 +748,11 @@ async def async_main() -> None:
         min_ev=settings.min_ev,
         max_bet=settings.max_bet,
         snipe_overdue_hours=settings.snipe_overdue_hours,
+        arb_threshold=settings.arb_threshold,
+        snipe_min_ask=settings.snipe_min_ask,
+        snipe_max_ask=settings.snipe_max_ask,
+        snipe_hold_probability=settings.snipe_hold_probability,
+        snipe_max_ttl_days=settings.snipe_max_ttl_hours / 24.0,
     )
     risk = RiskManager(
         bankroll=settings.bankroll,

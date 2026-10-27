@@ -64,6 +64,19 @@ services:
         value: "60"
       - key: MAX_MARKETS_PER_CYCLE
         value: "20"
+      # --- widened signal gates (an explicit, reversible choice) -------------
+      # The defaults (MIN_EV=0.02, SNIPE_MIN_ASK=0.93) produce a snipe band of
+      # [0.9300, 0.9314) -- 0.14 cents wide. That is honest but almost never
+      # trades, so this deployment opts into a wider band:
+      #   MIN_EV=0.01        -> EV cap 0.95 / 1.01 = 0.9406
+      #   SNIPE_MIN_ASK=0.90 -> band [0.9000, 0.9406), ~4 cents
+      # Cost of widening: the 0.95 hold assumption is now applied to markets
+      # priced as low as 0.90, where it is least reliable. Signals are still
+      # DRY-RUN records only. Delete these two keys to restore the strict band.
+      - key: MIN_EV
+        value: "0.01"
+      - key: SNIPE_MIN_ASK
+        value: "0.90"
       - key: LOG_LEVEL
         value: INFO
       - key: POLYGON_PRIVATE_KEY

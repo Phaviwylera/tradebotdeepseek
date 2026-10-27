@@ -77,7 +77,12 @@ class Settings:
     news_sentiment: float
 
     min_ev: float
+    arb_threshold: float
+    snipe_min_ask: float
+    snipe_max_ask: float
+    snipe_hold_probability: float
     snipe_overdue_hours: float
+    snipe_max_ttl_hours: float
     near_resolution_slots: int
     near_resolution_window_hours: float
     near_resolution_overdue_hours: float
@@ -130,7 +135,12 @@ class Settings:
             stream_backoff_seconds=_env_float("STREAM_BACKOFF_SECONDS", 2.0, minimum=0.1),
             news_sentiment=_env_float("NEWS_SENTIMENT", 0.0),
             min_ev=_env_float("MIN_EV", 0.02),
+            arb_threshold=_env_float("ARB_THRESHOLD", 0.985),
+            snipe_min_ask=_env_float("SNIPE_MIN_ASK", 0.93),
+            snipe_max_ask=_env_float("SNIPE_MAX_ASK", 0.97),
+            snipe_hold_probability=_env_float("SNIPE_HOLD_PROBABILITY", 0.95),
             snipe_overdue_hours=_env_float("SNIPE_OVERDUE_HOURS", 24.0),
+            snipe_max_ttl_hours=_env_float("SNIPE_MAX_TTL_HOURS", 2.4),
             near_resolution_slots=_env_int("NEAR_RESOLUTION_SLOTS", 8, minimum=0),
             near_resolution_window_hours=_env_float("NEAR_RESOLUTION_WINDOW_HOURS", 6.0),
             near_resolution_overdue_hours=_env_float("NEAR_RESOLUTION_OVERDUE_HOURS", 24.0),
@@ -142,6 +152,13 @@ class Settings:
             api_port=_env_int("API_PORT", 0),
             serve_dashboard=_env_bool("SERVE_DASHBOARD", True),
         )
+
+        if not 0.0 < settings.snipe_min_ask < settings.snipe_max_ask <= 1.0:
+            raise ValueError("need 0 < SNIPE_MIN_ASK < SNIPE_MAX_ASK <= 1")
+        if not 0.0 < settings.snipe_hold_probability <= 1.0:
+            raise ValueError("SNIPE_HOLD_PROBABILITY must be in (0, 1]")
+        if settings.arb_threshold > 1.0:
+            raise ValueError("ARB_THRESHOLD above 1.0 is not arbitrage")
 
         for name in ("max_daily_loss_pct", "max_drawdown_pct", "max_exposure_pct"):
             value = getattr(settings, name)
@@ -167,6 +184,8 @@ class Settings:
             "model_url_configured": bool(self.model_url),
             "snapshot_path": str(self.snapshot_path) if self.snapshot_path else None,
             "near_resolution_slots": self.near_resolution_slots,
+            "min_ev": self.min_ev,
+            "snipe_band": [self.snipe_min_ask, self.snipe_max_ask],
             "near_resolution_window_hours": self.near_resolution_window_hours,
             "scan_interval_seconds": self.scan_interval_seconds,
             "max_markets_per_cycle": self.max_markets_per_cycle,

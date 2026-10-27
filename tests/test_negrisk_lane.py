@@ -249,6 +249,42 @@ class NegRiskBasketTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.diagnostics["negrisk_checked"], 2)
         self.assertEqual(bot.diagnostics["negrisk_groups"], 3)
 
+    async def test_the_best_cost_is_reset_each_cycle(self) -> None:
+        # A running minimum since boot would publish an old price as current.
+        current = [outcome("A", 0.30), outcome("B", 0.30)]
+
+        class Scanner:
+            async def fetch_event_outcomes(self, event_id: str):
+                return "House 2026", current
+
+        bot = TradingBot(
+            settings=make_settings(),
+            scanner=Scanner(),
+            ledger=FakeLedger(),
+            strategy=StrategyEngine(min_ev=0.02, max_bet=20.0),
+            risk=SimpleNamespace(),
+            model=SimpleNamespace(loaded=False),
+            executor=SimpleNamespace(),
+        )
+
+        await bot._run_negrisk_lane([negrisk_market()])
+        self.assertAlmostEqual(bot.diagnostics["negrisk_best_cost"], 0.60, places=6)
+
+        current = [outcome("A", 0.60), outcome("B", 0.60)]
+        await bot._run_negrisk_lane([negrisk_market()])
+
+        self.assertAlmostEqual(bot.diagnostics["negrisk_best_cost"], 1.20, places=6)
+
+    async def test_a_cycle_without_negrisk_markets_clears_the_numbers(self) -> None:
+        bot, _ = make_bot([outcome("A", 0.30), outcome("B", 0.30)])
+        await bot._run_negrisk_lane([negrisk_market()])
+
+        self.assertEqual(await bot._run_negrisk_lane([]), 0)
+
+        self.assertIsNone(bot.diagnostics["negrisk_best_cost"])
+        self.assertIsNone(bot.diagnostics["negrisk_best_profit"])
+        self.assertEqual(bot.diagnostics["negrisk_checked"], 0)
+
     async def test_coverage_rotates_across_cycles(self) -> None:
         # Nine events, a budget of two: a fixed first-N window would price the
         # same two forever and never look at the other seven.

@@ -378,6 +378,11 @@ class TradingBot:
             if market.neg_risk and market.event_id and market.neg_risk_id:
                 groups.setdefault(market.event_id, market.neg_risk_id)
         self.diagnostics["negrisk_groups"] = len(groups)
+        # Reset per cycle, like best_arb_sum: a running minimum since boot would
+        # publish a basket price from hours ago as if it were the current one.
+        self.diagnostics["negrisk_best_cost"] = None
+        self.diagnostics["negrisk_best_profit"] = None
+        self.diagnostics["negrisk_checked"] = 0
         if not groups:
             return 0
 

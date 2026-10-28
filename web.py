@@ -251,9 +251,13 @@ def summarize_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any] 
     summary = {key: diagnostics.get(key) for key in DIAGNOSTIC_KEYS}
     closest = summary.get("closest_snipe_price")
     if isinstance(closest, dict):
+        # `distance` is a price gap only. Publishing it beside the time gate
+        # keeps "in band on price, outside the window" from reading as a bug.
         summary["closest_snipe_price"] = {
             "ask": closest.get("ask"),
             "distance": closest.get("distance"),
+            "in_time_window": closest.get("in_time_window"),
+            "hours_to_window": closest.get("hours_to_window"),
         }
     for key in ("snipe_band", "snipe_band_5pct", "snipe_band_na", "snipe_band_na_5pct"):
         band = summary.get(key)

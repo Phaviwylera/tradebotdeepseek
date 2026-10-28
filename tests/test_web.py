@@ -395,7 +395,17 @@ class GateDiagnosticsTests(unittest.TestCase):
         )
         assert summary is not None
         self.assertEqual(summary["near_resolution_candidates"], 7)
-        self.assertEqual(summary["closest_snipe_price"], {"ask": 0.9123, "distance": 0.0177})
+        # The token must not leak, but both gates are published: the price gap
+        # alone reads as a contradiction when the clock is the thing blocking it.
+        self.assertEqual(
+            summary["closest_snipe_price"],
+            {
+                "ask": 0.9123,
+                "distance": 0.0177,
+                "in_time_window": None,
+                "hours_to_window": None,
+            },
+        )
         self.assertNotIn("secret", summary)
 
     def test_summary_publishes_both_bands_so_the_cap_is_honest(self) -> None:

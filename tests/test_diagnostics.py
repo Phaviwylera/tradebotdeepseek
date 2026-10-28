@@ -111,6 +111,51 @@ class GateProximityTests(unittest.TestCase):
         self.assertEqual(closest["ask"], 0.93)
         self.assertEqual(closest["distance"], 0.0)
 
+    def test_a_price_in_the_band_but_outside_the_window_is_explained(self) -> None:
+        # The live contradiction: a 0.91 ask is inside [0.90, 0.9406) so the
+        # price distance is 0.0, yet it resolves in 6.16h -- well past the 2.4h
+        # snipe window. Publishing the time gate makes the pair read correctly.
+        # The production deployment widens the band to [0.90, 0.9406).
+        self.bot.strategy = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+        self.bot._record_gate_proximity(
+            market(datetime.now(timezone.utc) + timedelta(hours=6.16)),
+            book(0.9000, 0.9100),
+            book(0.0800, 0.0900),
+        )
+        closest = self.bot.diagnostics["closest_snipe_price"]
+        assert closest is not None
+        self.assertEqual(closest["distance"], 0.0)
+        self.assertFalse(closest["in_time_window"])
+        self.assertAlmostEqual(closest["hours_to_window"], 3.76, places=2)
+
+    def test_a_market_inside_both_gates_reports_an_open_window(self) -> None:
+        self.bot._record_gate_proximity(
+            market(datetime.now(timezone.utc) + timedelta(hours=1)),
+            book(0.9200, 0.9300),
+            book(0.0600, 0.0700),
+        )
+        closest = self.bot.diagnostics["closest_snipe_price"]
+        assert closest is not None
+        self.assertTrue(closest["in_time_window"])
+        self.assertEqual(closest["hours_to_window"], 0.0)
+
+    def test_a_market_blocked_only_by_the_clock_outranks_one_outside_the_band(self) -> None:
+        # 0.91 is one gate away (time); 0.80 is two gates away (price and time).
+        self.bot.strategy = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+        self.bot._record_gate_proximity(
+            market(datetime.now(timezone.utc) + timedelta(hours=6)),
+            book(0.7900, 0.8000),
+            book(0.1900, 0.2000),
+        )
+        self.bot._record_gate_proximity(
+            market(datetime.now(timezone.utc) + timedelta(hours=6)),
+            book(0.9000, 0.9100),
+            book(0.0800, 0.0900),
+        )
+        closest = self.bot.diagnostics["closest_snipe_price"]
+        assert closest is not None
+        self.assertEqual(closest["ask"], 0.91)
+
     def test_keeps_the_best_arb_sum_of_the_cycle(self) -> None:
         soon = datetime.now(timezone.utc) + timedelta(hours=1)
         self.bot._record_gate_proximity(market(soon), book(0.40, 0.41), book(0.60, 0.61))

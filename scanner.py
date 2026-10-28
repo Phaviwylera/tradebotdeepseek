@@ -65,6 +65,10 @@ class Market:
     neg_risk: bool = False
     neg_risk_id: str = ""
     event_id: str = ""
+    # Gamma's own statement of how this market settles if the event cannot be
+    # determined. "equal_split" means N/A -> both sides redeem at 0.50, which is
+    # a 47% loss on a position bought at 0.94. See resolution.py.
+    fallback_resolution_type: str = ""
 
     def fee_per_share(self, price: float) -> float:
         from fees import FeeSchedule
@@ -542,6 +546,7 @@ class MarketScanner:
             neg_risk=_truthy(raw.get("negRisk")),
             neg_risk_id=str(raw.get("negRiskMarketID") or ""),
             event_id=event_id,
+            fallback_resolution_type=str(raw.get("fallbackResolutionType") or ""),
         )
 
 

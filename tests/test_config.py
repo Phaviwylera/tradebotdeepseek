@@ -133,6 +133,20 @@ class SignalGateSettingsTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=value):
                 build(KELLY_FRACTION=value)
 
+    def test_na_risk_defaults_to_refusing_half_split_markets(self) -> None:
+        settings = build()
+        self.assertEqual(settings.na_probability, 0.02)
+        self.assertTrue(settings.require_unambiguous_resolution)
+
+    def test_na_risk_is_configurable(self) -> None:
+        settings = build(NA_PROBABILITY="0.05", REQUIRE_UNAMBIGUOUS_RESOLUTION="false")
+        self.assertEqual(settings.na_probability, 0.05)
+        self.assertFalse(settings.require_unambiguous_resolution)
+
+    def test_na_probability_above_one_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            build(NA_PROBABILITY="1.5")
+
     def test_negrisk_lane_is_on_by_default(self) -> None:
         settings = build()
         self.assertTrue(settings.negrisk_enabled)
@@ -156,6 +170,7 @@ class SignalGateSettingsTests(unittest.TestCase):
         summary = build().public_summary()
         self.assertEqual(summary["kelly_fraction"], 0.25)
         self.assertEqual(summary["negrisk_events"], 3)
+        self.assertEqual(summary["na_probability"], 0.02)
 
 
 if __name__ == "__main__":

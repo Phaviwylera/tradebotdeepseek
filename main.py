@@ -27,6 +27,7 @@ from features import build_features
 from ledger import Ledger
 from model import ProbabilityModel
 from negrisk import BasketLeg, evaluate_basket, plan_basket
+from resolution import fallback_is_ambiguous
 from risk import RiskManager
 from scanner import Market, MarketScanner, OrderBook, select_markets
 from snapshots import SnapshotRecorder
@@ -104,6 +105,10 @@ class TradingBot:
             # number baked into the page.
             "snipe_band": None,
             "snipe_band_5pct": None,
+            "snipe_band_na": None,
+            "snipe_band_na_5pct": None,
+            "na_probability": None,
+            "markets_ambiguous_resolution": 0,
             "min_ev": None,
             "arb_threshold": None,
             "effective_hold": None,
@@ -134,6 +139,14 @@ class TradingBot:
         low_fee, high_fee = self.strategy.snipe_band(0.05)
         self.diagnostics["snipe_band"] = {"min": round(low, 4), "max": round(high, 4)}
         self.diagnostics["snipe_band_5pct"] = {"min": round(low_fee, 4), "max": round(high_fee, 4)}
+        low_na, high_na = self.strategy.na_adjusted_band()
+        low_na_fee, high_na_fee = self.strategy.na_adjusted_band(0.05)
+        self.diagnostics["snipe_band_na"] = {"min": round(low_na, 4), "max": round(high_na, 4)}
+        self.diagnostics["snipe_band_na_5pct"] = {
+            "min": round(low_na_fee, 4),
+            "max": round(high_na_fee, 4),
+        }
+        self.diagnostics["na_probability"] = round(self.strategy.n_a_probability, 4)
         self.diagnostics["min_ev"] = self.strategy.min_ev
         self.diagnostics["arb_threshold"] = self.strategy.arb_threshold
         self.diagnostics["effective_hold"] = round(self.strategy.effective_hold, 6)
@@ -257,6 +270,7 @@ class TradingBot:
         self.diagnostics["best_arb_sum"] = None
         self.diagnostics["closest_ttl_hours"] = None
         self.diagnostics["markets_without_book"] = 0
+        self.diagnostics["markets_ambiguous_resolution"] = 0
         self.stream.set_assets(
             token for market in markets for token in (market.token_yes, market.token_no)
         )
@@ -284,6 +298,10 @@ class TradingBot:
                 continue
 
             evaluated += 1
+            if fallback_is_ambiguous(market.fallback_resolution_type):
+                # Counted because it changes what the bot will buy: a market that
+                # can settle 50-50 cannot produce a snipe signal on this config.
+                self.diagnostics["markets_ambiguous_resolution"] += 1
             try:
                 generated += await self._evaluate_market(market, yes_book, no_book)
             except Exception:
@@ -947,6 +965,8 @@ async def async_main() -> None:
         snipe_hold_probability=settings.snipe_hold_probability,
         snipe_max_ttl_days=settings.snipe_max_ttl_hours / 24.0,
         kelly_fraction=settings.kelly_fraction,
+        n_a_probability=settings.na_probability,
+        require_unambiguous_resolution=settings.require_unambiguous_resolution,
         measured_hold=measured.ci_low if measured is not None else None,
         measured_hold_source=evidence_gate.report.source if measured is not None else "",
     )

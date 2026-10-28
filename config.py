@@ -87,6 +87,8 @@ class Settings:
     near_resolution_slots: int
     near_resolution_window_hours: float
     near_resolution_overdue_hours: float
+    na_probability: float
+    require_unambiguous_resolution: bool
     kelly_fraction: float
     negrisk_enabled: bool
     negrisk_max_events: int
@@ -152,6 +154,8 @@ class Settings:
             near_resolution_slots=_env_int("NEAR_RESOLUTION_SLOTS", 8, minimum=0),
             near_resolution_window_hours=_env_float("NEAR_RESOLUTION_WINDOW_HOURS", 6.0),
             near_resolution_overdue_hours=_env_float("NEAR_RESOLUTION_OVERDUE_HOURS", 24.0),
+            na_probability=_env_float("NA_PROBABILITY", 0.02, minimum=0.0),
+            require_unambiguous_resolution=_env_bool("REQUIRE_UNAMBIGUOUS_RESOLUTION", True),
             kelly_fraction=_env_float("KELLY_FRACTION", 0.25),
             negrisk_enabled=_env_bool("NEGRISK_ENABLED", True),
             negrisk_max_events=_env_int("NEGRISK_MAX_EVENTS", 3, minimum=0),
@@ -175,6 +179,10 @@ class Settings:
         # the standard defence against an estimated probability being wrong.
         if not 0.0 < settings.kelly_fraction <= 1.0:
             raise ValueError("KELLY_FRACTION must be in (0, 1]")
+        # A market that can settle 50-50 caps a 0.94 position at a 47% loss, so
+        # this rate is charged against the edge rather than being decorative.
+        if settings.na_probability > 1.0:
+            raise ValueError("NA_PROBABILITY must be at most 1.0")
         if settings.negrisk_min_profit < 0.0:
             raise ValueError("NEGRISK_MIN_PROFIT cannot be negative")
 
@@ -205,6 +213,7 @@ class Settings:
             "near_resolution_slots": self.near_resolution_slots,
             "min_ev": self.min_ev,
             "kelly_fraction": self.kelly_fraction,
+            "na_probability": self.na_probability,
             "negrisk_events": self.negrisk_max_events,
             "snipe_band": [self.snipe_min_ask, self.snipe_max_ask],
             "near_resolution_window_hours": self.near_resolution_window_hours,

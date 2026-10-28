@@ -173,6 +173,24 @@ class MainTests(unittest.TestCase):
         self.assertAlmostEqual(payload["feasibility"]["multiple"], 300.0)
         self.assertIn("bid", payload["quote"])
 
+    def test_json_mode_publishes_the_na_budget(self) -> None:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            report.main(["--json", "--ask", "0.94", "--hold", "0.95", "--min-ev", "0.01"])
+
+        payload = json.loads(buffer.getvalue())
+        self.assertAlmostEqual(payload["resolution"]["n_a_budget"], 0.001333, places=5)
+        self.assertAlmostEqual(payload["resolution"]["adjusted_hold"], 0.9494, places=4)
+
+    def test_text_mode_publishes_the_na_budget(self) -> None:
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            report.main(["--ask", "0.94", "--hold", "0.95"])
+        text = buffer.getvalue()
+
+        self.assertIn("0.1333%", text)
+        self.assertIn("inventory risk", text)
+
     def test_text_mode_explains_itself_without_a_network(self) -> None:
         buffer = io.StringIO()
         with redirect_stdout(buffer):

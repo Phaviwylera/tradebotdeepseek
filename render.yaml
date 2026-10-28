@@ -82,6 +82,14 @@ services:
       # estimate is worse than you think; it almost certainly is.
       - key: KELLY_FRACTION
         value: "0.25"
+      # Resolution risk. A market whose rules admit a 50-50 fallback can settle at
+      # $0.50 a share, which is a 47% loss on a 0.94 entry. Charging 2% for that
+      # pulls a 0.95 hold down to 0.941 and the band cap from 0.9406 to 0.9317.
+      # Markets that declare equal_split are skipped entirely rather than priced.
+      - key: NA_PROBABILITY
+        value: "0.02"
+      - key: REQUIRE_UNAMBIGUOUS_RESOLUTION
+        value: "true"
       # NegRisk basket parity: buy all M outcomes of an event when the complete
       # basket costs < 1.00 after per-leg taker fees. Signals only -- the
       # executor cannot yet submit M legs as one risk-free basket.

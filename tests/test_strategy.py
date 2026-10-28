@@ -7,7 +7,11 @@ from scanner import Market, OrderBook
 from strategy import StrategyEngine
 
 
-def make_market(end_date: datetime | None = None, fee_rate: float = 0.0) -> Market:
+def make_market(
+    end_date: datetime | None = None,
+    fee_rate: float = 0.0,
+    fallback_resolution_type: str = "",
+) -> Market:
     return Market(
         condition_id="0xcondition",
         question="Will the test resolve YES?",
@@ -17,6 +21,7 @@ def make_market(end_date: datetime | None = None, fee_rate: float = 0.0) -> Mark
         liquidity=10_000.0,
         end_date=end_date or datetime.now(timezone.utc) + timedelta(days=10),
         fee_rate=fee_rate,
+        fallback_resolution_type=fallback_resolution_type,
     )
 
 
@@ -400,3 +405,89 @@ class MeasuredHoldTests(unittest.TestCase):
             StrategyEngine(measured_hold=0.0)
         with self.assertRaises(ValueError):
             StrategyEngine(measured_hold=1.4)
+
+
+class ResolutionGateTests(unittest.TestCase):
+    """A market that can settle 50-50 cannot be sniped at 0.94.
+
+    N/A pays both sides 0.50, so a 0.94 position loses 47% if the event is
+    cancelled or ruled unresolvable. The doc describes this risk and never
+    prices it; these tests price it.
+    """
+
+    def setUp(self) -> None:
+        self.now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        self.yes = make_book("yes-token", 0.9300, 0.9400)
+        self.no = make_book("no-token", 0.0500, 0.0600)
+
+    def market(self, fallback: str, fee_rate: float = 0.0) -> Market:
+        return make_market(
+            self.now + timedelta(hours=1),
+            fee_rate=fee_rate,
+            fallback_resolution_type=fallback,
+        )
+
+    def test_a_half_split_market_is_refused_outright(self) -> None:
+        engine = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+        signals = engine.check_snipe(self.market("equal_split"), self.yes, self.no, now=self.now)
+
+        self.assertEqual(signals, [])
+
+    def test_the_same_market_is_taken_when_the_fallback_is_none(self) -> None:
+        engine = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+        signals = engine.check_snipe(self.market("none"), self.yes, self.no, now=self.now)
+
+        self.assertEqual(len(signals), 1)
+
+    def test_the_refusal_is_configurable(self) -> None:
+        engine = StrategyEngine(
+            min_ev=0.01,
+            snipe_min_ask=0.90,
+            require_unambiguous_resolution=False,
+            n_a_probability=0.0,
+        )
+        signals = engine.check_snipe(self.market("equal_split"), self.yes, self.no, now=self.now)
+
+        self.assertEqual(len(signals), 1)
+
+    def test_the_na_charge_shrinks_the_band_cap(self) -> None:
+        engine = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90, n_a_probability=0.02)
+        optimistic = engine.snipe_band()[1]
+        adjusted = engine.na_adjusted_band()[1]
+
+        self.assertLess(adjusted, optimistic)
+        self.assertAlmostEqual(adjusted, 0.9317, places=4)
+
+    def test_a_fee_on_top_of_na_closes_the_band_further(self) -> None:
+        engine = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90, n_a_probability=0.02)
+
+        self.assertLess(engine.na_adjusted_band(0.05)[1], engine.na_adjusted_band()[1])
+
+    def test_the_na_charge_is_applied_to_a_market_with_a_fallback(self) -> None:
+        engine = StrategyEngine(n_a_probability=0.10, snipe_hold_probability=0.95)
+
+        self.assertAlmostEqual(engine.snipe_hold(self.market("equal_split")), 0.905, places=9)
+        self.assertAlmostEqual(engine.snipe_hold(self.market("none")), 0.95, places=9)
+
+    def test_the_signal_reason_publishes_the_na_room(self) -> None:
+        engine = StrategyEngine(min_ev=0.01, snipe_min_ask=0.90)
+        signals = engine.check_snipe(self.market("none"), self.yes, self.no, now=self.now)
+
+        self.assertIn("na_room=", signals[0].reason)
+
+    def test_a_large_na_assumption_kills_the_094_trade(self) -> None:
+        # 5% N/A drags a 0.95 hold to 0.9275, below the 0.94 ask: no edge at all.
+        engine = StrategyEngine(
+            min_ev=0.01,
+            snipe_min_ask=0.90,
+            n_a_probability=0.05,
+            require_unambiguous_resolution=False,
+        )
+        signals = engine.check_snipe(self.market("equal_split"), self.yes, self.no, now=self.now)
+
+        self.assertEqual(signals, [])
+
+    def test_out_of_range_na_probability_is_rejected(self) -> None:
+        for bad in (-0.01, 1.01):
+            with self.assertRaises(ValueError):
+                StrategyEngine(n_a_probability=bad)

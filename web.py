@@ -226,6 +226,10 @@ DIAGNOSTIC_KEYS = (
     "closest_ttl_hours",
     "snipe_band",
     "snipe_band_5pct",
+    "snipe_band_na",
+    "snipe_band_na_5pct",
+    "na_probability",
+    "markets_ambiguous_resolution",
     "min_ev",
     "arb_threshold",
     "effective_hold",
@@ -251,7 +255,7 @@ def summarize_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any] 
             "ask": closest.get("ask"),
             "distance": closest.get("distance"),
         }
-    for key in ("snipe_band", "snipe_band_5pct"):
+    for key in ("snipe_band", "snipe_band_5pct", "snipe_band_na", "snipe_band_na_5pct"):
         band = summary.get(key)
         if isinstance(band, dict):
             summary[key] = {"min": band.get("min"), "max": band.get("max")}

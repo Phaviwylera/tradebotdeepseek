@@ -33,8 +33,10 @@ if str(ROOT) not in sys.path:
 
 from fees import from_gamma  # noqa: E402
 from marketmaking import quote  # noqa: E402
+from microstructure import probability_quote, risk_share  # noqa: E402
 from negrisk import BasketLeg, evaluate_basket  # noqa: E402
 from research.growth import feasibility  # noqa: E402
+from resolution import n_a_budget  # noqa: E402
 
 GAMMA = "https://gamma-api.polymarket.com"
 
@@ -137,11 +139,16 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--mid", type=float, default=0.62, help="mid for the market-making quote")
     parser.add_argument("--inventory", type=float, default=0.0)
     parser.add_argument("--events", type=int, default=40, help="NegRisk events to price")
+    parser.add_argument("--ask", type=float, default=0.94, help="entry ask for the N/A budget")
+    parser.add_argument("--hold", type=float, default=0.95, help="assumed hold probability")
+    parser.add_argument("--min-ev", type=float, default=0.01)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     result = feasibility(args.start, args.target, args.days, entry_price=args.entry_price)
     quote_result = quote(args.mid, inventory=args.inventory)
+    budget = n_a_budget(args.hold, args.ask, args.min_ev)
+    adjusted = (1 - budget) * args.hold + budget * 0.5
 
     baskets: list[dict[str, Any]] = []
     error = ""
@@ -156,6 +163,12 @@ def main(argv: Iterable[str] | None = None) -> int:
                 {
                     "feasibility": result.as_dict(),
                     "quote": quote_result.as_dict(),
+                    "resolution": {
+                        "n_a_budget": round(budget, 6),
+                        "ask": args.ask,
+                        "hold": args.hold,
+                        "adjusted_hold": round(adjusted, 6),
+                    },
                     "baskets_scanned": len(baskets),
                     "cheapest": baskets[:5],
                     "error": error,
@@ -173,6 +186,25 @@ def main(argv: Iterable[str] | None = None) -> int:
         f"-> spread {quote_result.spread:.3f} ({quote_result.edge_bps:.0f} bps of mid)"
     )
     print("  makers pay no protocol fee; spread and rebate are the whole edge.")
+    print(
+        f"  inventory risk is {risk_share(args.mid) * 100:.2f}% of that width: "
+        "the rest is adverse-selection rent, not a volatility charge."
+    )
+    bounded = probability_quote(args.mid, inventory=args.inventory)
+    print(
+        f"  bounded-price quote: bid {bounded.bid:.3f} / ask {bounded.ask:.3f} "
+        f"(logit-space, clamped to the tick grid)"
+    )
+    print()
+    print(
+        f"Resolution risk at a {args.ask:.2f} entry with a {args.hold:.2f} hold "
+        f"and a {args.min_ev:.0%} gate:"
+    )
+    print(
+        f"  the trade survives {budget:.4%} chance of an N/A (50-50) settlement. "
+        "Above that the 47% haircut eats the edge."
+    )
+    print(f"  expected payout at that budget: {adjusted:.4f} against a {args.ask:.2f} cost")
     print()
     if error:
         print(f"NegRisk scan skipped: {error}")

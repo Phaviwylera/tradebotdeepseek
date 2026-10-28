@@ -232,9 +232,53 @@ python scripts/quant_report.py --start 20 --target 6000 --days 3
 python scripts/quant_report.py --mid 0.62 --inventory 200
 ```
 
-`docs/QUANT_STRATEGIES.md` records what was adopted from the quant memo this
-implements, and what was rejected (its fee table is ~5x wrong; `convertPositions`
-needs a funded wallet and a non-geoblocked host).
+`docs/QUANT_STRATEGIES.md` records what was adopted from the two quant memos this
+implements, and what was rejected (their fee tables are ~5x wrong;
+`convertPositions` needs a funded wallet and a non-geoblocked host).
+
+### 6. Resolution (N/A) risk
+
+A market does not always resolve YES or NO. If the event is cancelled or ruled
+unresolvable, UMA settles it **N/A** and *both* outcomes redeem at $0.50. For a
+position bought at 0.94 that is a 47% loss on a trade the bot called 95% safe.
+Gamma publishes the fallback on every market as `fallbackResolutionType`;
+`equal_split` means exactly that.
+
+This is the largest risk in the snipe strategy, and it is charged like one:
+
+```text
+E[payout] = (1 - q) * hold + q * 0.50
+```
+
+N/A is charged at `hold - 0.50` = 45 cents per unit, so the numbers are brutal:
+
+| N/A probability | expected payout | return at a 0.94 entry |
+| --- | --- | --- |
+| 0% | 0.9500 | +1.06% |
+| 1% | 0.9455 | +0.59% |
+| 5% | 0.9275 | **-1.33%** |
+
+The whole 1% EV margin at 0.94 is a **0.13%** N/A probability. Since that cannot
+be measured, markets that declare a 50-50 fallback are refused outright
+(`REQUIRE_UNAMBIGUOUS_RESOLUTION=true`), and any that remain are charged a stated
+2% (`NA_PROBABILITY`). That pulls a 0.95 hold to 0.941 and the band cap from
+0.9406 to **0.9317**, published as `snipe_band_na` next to the optimistic one.
+
+### 7. Execution realism and bounded-price quoting
+
+`microstructure.py` implements the logit transform from the memo — `dp/dx = p(1-p)`
+— and uses it to quote in probability space. It also measures the unglamorous
+part: **a book is a ladder, not a price.** At a 0.94 ask the snipe's whole edge is
+one cent, so a second level half a cent higher erases half of it while the
+quoted price still reads 0.94. `walk_book()` returns the real average fill,
+`max_shares_within()` trims to stay inside the EV cap, and `cap_to_depth()` keeps
+an order to a fraction of visible size.
+
+One correction worth stating: at realistic parameters (`sigma_b`=0.05, one day of
+horizon) the model's **inventory-risk term is 0.07% of the quoted width** and the
+skew is sub-tick. The `[p(1-p)]^2` factor governs *sensitivity*, not spread width;
+nearly all of a quoted spread is adverse-selection rent. Details in
+`docs/QUANT_STRATEGIES.md`.
 
 ---
 
@@ -393,6 +437,8 @@ network, no account. The console is also deployed publicly from
 | `NEGRISK_ENABLED` | `true` | Score complete NegRisk baskets priced under 1.00 after fees. |
 | `NEGRISK_MAX_EVENTS` | `3` | How many NegRisk events to price per cycle (each is one extra Gamma call). |
 | `NEGRISK_MIN_PROFIT` | `0.005` | Minimum post-fee profit per basket before a signal is recorded. |
+| `NA_PROBABILITY` | `0.02` | Assumed chance a market settles N/A (50-50). Blended into the hold: 2% drags 0.95 → 0.941. |
+| `REQUIRE_UNAMBIGUOUS_RESOLUTION` | `true` | Refuse markets whose `fallbackResolutionType` admits a 50-50 settlement. |
 | `LEDGER_PATH` | `ledger.db` | SQLite file. Falls back to `/tmp/polymarket-bot/` with a warning if the path is not writable. |
 | `MODEL_PATH` | `model.joblib` | Optional calibrated model artifact. |
 | `MODEL_URL` | *(empty)* | Download the artifact at startup when `MODEL_PATH` is absent. How a diskless host gets a model. |

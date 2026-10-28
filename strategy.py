@@ -7,6 +7,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from fees import arbitrage_cost, max_price_for_hold, net_edge
+from resolution import (
+    ResolutionRisk,
+    assess_resolution,
+    n_a_budget,
+)
+from resolution import (
+    n_a_adjusted_hold as n_a_adjusted_hold_for,
+)
 from scanner import Market, OrderBook
 
 ARBITRAGE_THRESHOLD = 0.985
@@ -15,6 +23,11 @@ SNIPE_MIN_ASK = 0.93
 SNIPE_MAX_ASK = 0.97
 SNIPE_HOLD_PROBABILITY = 0.95
 CONFIDENCE_FLOOR = 0.60
+# How often a market whose rules admit a 50-50 fallback actually settles N/A. This
+# is an assumption like the hold probability, and it is charged the same way: at
+# 2%, a 0.95 hold becomes 0.941 and the 1%-EV band cap falls from 0.9406 to
+# 0.9317. It is configurable because it is a belief, not a fact.
+NA_PROBABILITY = 0.02
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +56,8 @@ class StrategyEngine:
         measured_hold: float | None = None,
         measured_hold_source: str = "",
         kelly_fraction: float = 0.25,
+        n_a_probability: float = NA_PROBABILITY,
+        require_unambiguous_resolution: bool = True,
     ) -> None:
         if min_ev < 0:
             raise ValueError("min_ev must be non-negative")
@@ -80,6 +95,12 @@ class StrategyEngine:
         # exactly the window where a 0.93 ask means "almost certainly resolves
         # YES". Rejecting ttl < 0 hid the whole in-play case.
         self.snipe_overdue_hours = float(snipe_overdue_hours)
+        # A market that can settle 50-50 caps a 0.94 position at a 47% loss, so
+        # the probability of that is part of the hold assumption, not a footnote.
+        if not 0.0 <= n_a_probability <= 1.0:
+            raise ValueError("n_a_probability must be in [0, 1]")
+        self.n_a_probability = float(n_a_probability)
+        self.require_unambiguous_resolution = bool(require_unambiguous_resolution)
 
     def check_arbitrage(
         self, market: Market, yes_book: OrderBook, no_book: OrderBook
@@ -147,7 +168,19 @@ class StrategyEngine:
             return min(self.measured_hold, self.snipe_hold_probability)
         return self.snipe_hold_probability
 
-    def snipe_max_ask(self, fee_rate: float = 0.0) -> float:
+    def resolution_risk(self, market: Market) -> ResolutionRisk:
+        """Blend this market's N/A fallback into the hold assumption."""
+        return assess_resolution(
+            market.fallback_resolution_type,
+            hold_probability=self.effective_hold,
+            n_a_probability=self.n_a_probability,
+        )
+
+    def snipe_hold(self, market: Market) -> float:
+        """The hold probability actually used for one market, N/A included."""
+        return self.resolution_risk(market).adjusted_hold
+
+    def snipe_max_ask(self, fee_rate: float = 0.0, hold: float | None = None) -> float:
         """Highest ask that clears ``MIN_EV`` against the hold, fees included.
 
         ``SNIPE_MAX_ASK`` is the band the strategy is willing to look at; the EV
@@ -157,16 +190,30 @@ class StrategyEngine:
         was empty once fees were counted.
         """
         cap = max_price_for_hold(
-            self.effective_hold,
+            self.effective_hold if hold is None else float(hold),
             self.min_ev,
             fee_rate,
             ceiling=self._snipe_max_ask_setting,
         )
         return cap if cap is not None else 0.0
 
-    def snipe_band(self, fee_rate: float = 0.0) -> tuple[float, float]:
-        """Half-open ask range the snipe strategy can actually trade."""
-        return max(self.snipe_min_ask, 0.0), self.snipe_max_ask(fee_rate)
+    def snipe_band(self, fee_rate: float = 0.0, hold: float | None = None) -> tuple[float, float]:
+        """Half-open ask range the snipe strategy can actually trade.
+
+        ``hold`` defaults to the global assumption. Pass a market-specific hold
+        (see :meth:`snipe_hold`) to get the band that market really has.
+        """
+        return max(self.snipe_min_ask, 0.0), self.snipe_max_ask(fee_rate, hold)
+
+    def na_adjusted_band(self, fee_rate: float = 0.0) -> tuple[float, float]:
+        """The band once the N/A fallback is charged to the hold assumption.
+
+        This is the number worth publishing: ``[0.90, 0.9406)`` is optimistic if
+        a mere 2% chance of a 50-50 settlement is real, because it drags a 0.95
+        hold to 0.941 and the cap to 0.9317.
+        """
+        hold = n_a_adjusted_hold_for(self.effective_hold, self.n_a_probability)
+        return max(self.snipe_min_ask, 0.0), self.snipe_max_ask(fee_rate, hold)
 
     def describe_gates(self) -> str:
         """One line a log can print so "why is it quiet?" is answerable."""
@@ -212,6 +259,17 @@ class StrategyEngine:
         if ttl_days < overdue_floor:
             return []
 
+        # A market whose rules admit a 50-50 fallback can settle at 0.50, which
+        # is a 47% loss on a 0.94 position. Refusing it outright is cheaper than
+        # pricing the probability of it, and the probability is unknowable here.
+        risk = assess_resolution(
+            market.fallback_resolution_type,
+            hold_probability=self.effective_hold,
+            n_a_probability=self.n_a_probability,
+        )
+        if risk.ambiguous and self.require_unambiguous_resolution:
+            return []
+
         candidates: list[Signal] = []
         for label, token_id, book in (
             ("YES", market.token_yes, yes_book),
@@ -219,15 +277,19 @@ class StrategyEngine:
         ):
             ask = book.best_ask
             # One-sided books are normal near resolution, so `ask` is often
-            # None here: check it before touching it.
-            if ask is None or not (self.snipe_min_ask <= ask < self.snipe_max_ask(market.fee_rate)):
+            # None here: check it before touching it. The cap uses *this*
+            # market's hold, so a 50-50 fallback cannot sneak under the band.
+            cap = self.snipe_max_ask(market.fee_rate, risk.adjusted_hold)
+            if ask is None or not (self.snipe_min_ask <= ask < cap):
                 continue
             fee = market.fee_per_share(float(ask))
             ev_roi, _ = net_edge(
-                float(ask), self.effective_hold, market.fee_rate, market.fee_exponent
+                float(ask), risk.adjusted_hold, market.fee_rate, market.fee_exponent
             )
             if ev_roi <= self.min_ev:
                 continue
+            # How much resolution ambiguity this specific trade could survive.
+            budget = n_a_budget(risk.adjusted_hold, float(ask), self.min_ev)
             size_usd = self.max_bet
             candidates.append(
                 Signal(
@@ -238,8 +300,9 @@ class StrategyEngine:
                     size_usd=size_usd,
                     reason=(
                         f"SNIPE {label} ttl_h={ttl_days * 24.0:.2f} "
-                        f"ask={ask:.4f} hold={self.effective_hold:.4f} "
+                        f"ask={ask:.4f} hold={risk.adjusted_hold:.4f} "
                         f"fee={fee:.4f} "
+                        f"na_room={budget:.4f} "
                         f"ev_roi={ev_roi:.4f}"
                     ),
                     expected_value=size_usd * ev_roi,

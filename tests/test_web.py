@@ -398,6 +398,23 @@ class GateDiagnosticsTests(unittest.TestCase):
         self.assertEqual(summary["closest_snipe_price"], {"ask": 0.9123, "distance": 0.0177})
         self.assertNotIn("secret", summary)
 
+    def test_summary_publishes_both_bands_so_the_cap_is_honest(self) -> None:
+        # 0.9406 is optimistic; 0.9317 is what the same gate yields once a 2%
+        # chance of a 50-50 settlement is charged.
+        summary = web.summarize_diagnostics(
+            {
+                "snipe_band": {"min": 0.9, "max": 0.9406, "token": "leak"},
+                "snipe_band_na": {"min": 0.9, "max": 0.9317},
+                "na_probability": 0.02,
+                "markets_ambiguous_resolution": 3,
+            }
+        )
+        assert summary is not None
+        self.assertEqual(summary["snipe_band"], {"min": 0.9, "max": 0.9406})
+        self.assertEqual(summary["snipe_band_na"], {"min": 0.9, "max": 0.9317})
+        self.assertEqual(summary["na_probability"], 0.02)
+        self.assertEqual(summary["markets_ambiguous_resolution"], 3)
+
     def test_summary_publishes_the_negrisk_lane(self) -> None:
         summary = web.summarize_diagnostics(
             {

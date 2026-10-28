@@ -567,11 +567,26 @@ class TradingBot:
 
         nearest = min(candidates, key=band_distance)
         distance = band_distance(nearest)
+        # Publish *both* gates. `distance` is a price gap, so a price inside the
+        # band reports 0.0 even when the market is hours away from the time
+        # window -- which made /healthz read "nearest ask 0.91, distance 0.0"
+        # next to "in_band: 0". Those are not contradictory once the time gate
+        # is named.
+        hours_to_window: float | None = None
+        if ttl_days is not None:
+            hours = ttl_days * 24.0
+            hours_to_window = max(0.0, round(hours - strategy.snipe_max_ttl_days * 24.0, 2))
         previous = self.diagnostics.get("closest_snipe_price")
-        if previous is None or distance < previous.get("distance", float("inf")):
+        # Rank by how much has to change before this can fire: a market blocked
+        # only by the clock is nearer than one six cents outside the band.
+        score = (distance, 0.0 if time_ok else 1.0, hours_to_window or 0.0)
+        if previous is None or score < previous.get("_score", (float("inf"), 1.0, 0.0)):
             self.diagnostics["closest_snipe_price"] = {
                 "ask": round(float(nearest), 4),
                 "distance": round(distance, 4),
+                "in_time_window": bool(time_ok),
+                "hours_to_window": hours_to_window,
+                "_score": score,
             }
 
     def _model_signal(
